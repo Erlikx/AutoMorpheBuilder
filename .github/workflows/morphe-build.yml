@@ -362,10 +362,12 @@ jobs:
                 echo "Using pinned version for $PKG: $PINNED_VERSION"
                 VERSION_TO_DOWNLOAD="$PINNED_VERSION"
               else
-                # Normal flow: get latest supported version from morphe-cli
+                # Normal flow: get latest supported version from morphe-cli.
+                # Pass --patches so the CLI uses the downloaded .mpp and
+                # --filter-package-names so the output is filtered to this app.
                 cp "$MPP_FILE" tools/patches.mpp
                 echo "Getting supported version for $PKG..."
-                VERSIONS_OUTPUT=$(java -jar tools/morphe-cli.jar list-versions "$PKG" 2>/dev/null || echo "")
+                VERSIONS_OUTPUT=$(java -jar tools/morphe-cli.jar list-versions -f "$PKG" --patches=tools/patches.mpp 2>/dev/null || echo "")
                 echo "::debug::morphe-cli output for $PKG: $VERSIONS_OUTPUT"
                 VERSION_TO_DOWNLOAD=$(echo "$VERSIONS_OUTPUT" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)
               fi
@@ -397,7 +399,7 @@ jobs:
                 if [ -n "$PINNED_VERSION" ] && [ "$PINNED_VERSION" != "null" ]; then
                   echo "Pinned version download failed; falling back to auto-resolution for $PKG..."
                   cp "$MPP_FILE" tools/patches.mpp
-                  VERSIONS_OUTPUT=$(java -jar tools/morphe-cli.jar list-versions "$PKG" 2>/dev/null || echo "")
+                  VERSIONS_OUTPUT=$(java -jar tools/morphe-cli.jar list-versions -f "$PKG" --patches=tools/patches.mpp 2>/dev/null || echo "")
                   FALLBACK_VERSION=$(echo "$VERSIONS_OUTPUT" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)
                   if [ -n "$FALLBACK_VERSION" ]; then
                     echo "Retrying download with auto-resolved version: $FALLBACK_VERSION"
@@ -724,64 +726,117 @@ jobs:
             '.[$repo][$pkg] // {} | to_entries | map(select(.value == false) | .key)' \
             patches.json 2>/dev/null || echo '[]')"
 
-          STRICT_VERSIONS="$(
-            jq -r \
-              --arg pkg "${{ matrix.appId }}" \
-              --argjson disabled "$DISABLED_PATCHES_JSON" \
-              '
-              (.patches // .)
-              | map(
-                  select(
-                    ((.use // true) == true)
-                    and ((.name as $n | ($disabled | index($n)) | not))
-                    and ((.compatiblePackages | type) == "array")
-                    and ([.compatiblePackages[]? | select(.packageName == $pkg)] | length > 0)
-                  )
-                )
-              | map([.compatiblePackages[]? | select(.packageName == $pkg) | .targets[]?.version] | unique) as $version_lists
-              | if ($version_lists | length) == 0 then
-                  empty
-                else
-                  reduce $version_lists[] as $current ($version_lists[0];
-                    map(select($current | index(.)))
-                  ) | .[]
-                end
-              ' "$TOOLS_DIR/patches-list.json" || true
-          )"
-
-          VERSION_COUNTS="$(
-            jq -r \
-              --arg pkg "${{ matrix.appId }}" \
-              --argjson disabled "$DISABLED_PATCHES_JSON" \
-              '
-              (.patches // .) as $patches
-              | $patches
-              | map(
-                  select(
-                    ((.use // true) == true)
-                    and ((.name as $n | ($disabled | index($n)) | not))
-                    and ((.compatiblePackages | type) == "array")
-                    and ([.compatiblePackages[]? | select(.packageName == $pkg)] | length > 0)
-                  )
-                )
-              | map(.compatiblePackages[]? | select(.packageName == $pkg) | .targets[]?.version)
-              | flatten
-              | sort
-              | group_by(.)
-              | map([length, .[0]])
-              | .[]
-              | @tsv
-              ' "$TOOLS_DIR/patches-list.json" || true
-          )"
-
+          # Primary source: morphe-cli list-versions. The CLI reads from the .mpp
+          # file (the same artifact used to apply patches) and already filters out
+          # experimental targets and patches with default=false. This is the
+          # authoritative "most common compatible version" and avoids the
+          # patches-list.json <-> .mpp drift that previously caused the workflow
+          # to pick experimental versions (e.g. Reddit 2026.19.0) that no patch
+          # could actually apply.
+          #
+          # We deliberately trust the CLI's ranked list rather than
+          # cross-checking each version against patches-list.json: the JSON is
+          # regenerated separately and can lag behind the .mpp (the actual
+          # artifact used to apply patches). If a user wants to force a
+          # particular version they can set `pin_version` in config.json, which
+          # is checked above.
+          MPP_FILE="$TOOLS_DIR/${PATCH_SLUG}.mpp"
           TARGET_VERSION=""
           TARGET_VERSIONS=""
-          if [ -n "$STRICT_VERSIONS" ]; then
-            TARGET_VERSIONS="$(printf '%s\n' "$STRICT_VERSIONS" | sort -Vr | paste -sd, -)"
-            TARGET_VERSION="$(printf '%s\n' "$STRICT_VERSIONS" | sort -Vr | head -n1)"
-          elif [ -n "$VERSION_COUNTS" ]; then
-            TARGET_VERSIONS="$(printf '%s\n' "$VERSION_COUNTS" | sort -t $'\t' -k1,1nr -k2,2Vr | cut -f2 | paste -sd, -)"
-            TARGET_VERSION="$(printf '%s\n' "$VERSION_COUNTS" | sort -t $'\t' -k1,1nr -k2,2Vr | head -n1 | cut -f2)"
+          if [ -f "$MPP_FILE" ] && [ -f "$TOOLS_DIR/morphe-cli.jar" ]; then
+            echo "Querying morphe-cli list-versions for ${{ matrix.appId }}..."
+            MORPHE_CLI_OUTPUT="$(
+              java -jar "$TOOLS_DIR/morphe-cli.jar" \
+                list-versions -f "${{ matrix.appId }}" \
+                --patches="$MPP_FILE" 2>/dev/null || true
+            )"
+            echo "morphe-cli list-versions output for ${{ matrix.appId }}:"
+            printf '%s\n' "$MORPHE_CLI_OUTPUT" | sed 's/^/  /'
+            MORPHE_CLI_VERSIONS="$(printf '%s\n' "$MORPHE_CLI_OUTPUT" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || true)"
+            if [ -n "$MORPHE_CLI_VERSIONS" ]; then
+              TARGET_VERSION="$(printf '%s\n' "$MORPHE_CLI_VERSIONS" | head -n1)"
+              TARGET_VERSIONS="$(printf '%s\n' "$MORPHE_CLI_VERSIONS" | paste -sd, -)"
+              echo "Selected version for ${{ matrix.appId }}: $TARGET_VERSION (morphe-cli list-versions; experimental targets filtered)"
+            fi
+          fi
+
+          # Fallback: patches-list.json-based logic. The same two-tier strategy
+          # (strict intersection, then count-based) as before, with the
+          # additional defense of filtering out isExperimental targets so we
+          # never fall back to selecting an experimental version.
+          if [ -z "$TARGET_VERSION" ]; then
+            echo "morphe-cli did not return a usable version; falling back to patches-list.json logic..."
+
+            STRICT_VERSIONS="$(
+              jq -r \
+                --arg pkg "${{ matrix.appId }}" \
+                --argjson disabled "$DISABLED_PATCHES_JSON" \
+                '
+                (.patches // .)
+                | map(
+                    select(
+                      ((.use // true) == true)
+                      and ((.name as $n | ($disabled | index($n)) | not))
+                      and ((.compatiblePackages | type) == "array")
+                      and ([.compatiblePackages[]? | select(.packageName == $pkg)] | length > 0)
+                    )
+                  )
+                | map(
+                    [.compatiblePackages[]?
+                      | select(.packageName == $pkg)
+                      | .targets[]?
+                      | select((.isExperimental // false) == false)
+                      | .version
+                    ] | unique
+                  ) as $version_lists
+                | if ($version_lists | length) == 0 then
+                    empty
+                  else
+                    reduce $version_lists[] as $current ($version_lists[0];
+                      map(select($current | index(.)))
+                    ) | .[]
+                  end
+                ' "$TOOLS_DIR/patches-list.json" || true
+            )"
+
+            VERSION_COUNTS="$(
+              jq -r \
+                --arg pkg "${{ matrix.appId }}" \
+                --argjson disabled "$DISABLED_PATCHES_JSON" \
+                '
+                (.patches // .) as $patches
+                | $patches
+                | map(
+                    select(
+                      ((.use // true) == true)
+                      and ((.name as $n | ($disabled | index($n)) | not))
+                      and ((.compatiblePackages | type) == "array")
+                      and ([.compatiblePackages[]? | select(.packageName == $pkg)] | length > 0)
+                    )
+                  )
+                | map(
+                    .compatiblePackages[]?
+                    | select(.packageName == $pkg)
+                    | .targets[]?
+                    | select((.isExperimental // false) == false)
+                    | .version
+                  )
+                | flatten
+                | sort
+                | group_by(.)
+                | map([length, .[0]])
+                | .[]
+                | @tsv
+                ' "$TOOLS_DIR/patches-list.json" || true
+            )"
+
+            if [ -n "$STRICT_VERSIONS" ]; then
+              TARGET_VERSIONS="$(printf '%s\n' "$STRICT_VERSIONS" | sort -Vr | paste -sd, -)"
+              TARGET_VERSION="$(printf '%s\n' "$STRICT_VERSIONS" | sort -Vr | head -n1)"
+            elif [ -n "$VERSION_COUNTS" ]; then
+              TARGET_VERSIONS="$(printf '%s\n' "$VERSION_COUNTS" | sort -t $'\t' -k1,1nr -k2,2Vr | cut -f2 | paste -sd, -)"
+              TARGET_VERSION="$(printf '%s\n' "$VERSION_COUNTS" | sort -t $'\t' -k1,1nr -k2,2Vr | head -n1 | cut -f2)"
+            fi
           fi
 
           if [ -n "$TARGET_VERSION" ]; then
@@ -1085,7 +1140,7 @@ jobs:
               FALLBACK_SLUG="${PATCH_REPO//\//-}"
               if [ -f "tools/${FALLBACK_SLUG}.mpp" ]; then
                 cp "tools/${FALLBACK_SLUG}.mpp" tools/patches.mpp
-                FALLBACK_VERSIONS=$(java -jar tools/morphe-cli.jar list-versions "$APP_ID" 2>/dev/null || echo "")
+                FALLBACK_VERSIONS=$(java -jar tools/morphe-cli.jar list-versions -f "$APP_ID" --patches=tools/patches.mpp 2>/dev/null || echo "")
                 FALLBACK_VERSION=$(echo "$FALLBACK_VERSIONS" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)
                 if [ -n "$FALLBACK_VERSION" ]; then
                   echo "Emergency fallback: retrying with version $FALLBACK_VERSION"
