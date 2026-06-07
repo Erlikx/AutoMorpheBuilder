@@ -741,12 +741,17 @@ jobs:
           # particular version they can set `pin_version` in config.json, which
           # is checked above.
           MPP_FILE="$TOOLS_DIR/${PATCH_SLUG}.mpp"
+          # The CLI jar is downloaded with a versioned name (e.g.
+          # tools/morphe-cli-1.9.0-all.jar). Resolve it via glob rather than
+          # hard-coding the name, since only the check-versions job renames it
+          # to tools/morphe-cli.jar.
+          MORPHE_CLI_JAR="$(ls -1 $TOOLS_DIR/morphe-cli-*-all.jar 2>/dev/null | head -n1 || true)"
           TARGET_VERSION=""
           TARGET_VERSIONS=""
-          if [ -f "$MPP_FILE" ] && [ -f "$TOOLS_DIR/morphe-cli.jar" ]; then
-            echo "Querying morphe-cli list-versions for ${{ matrix.appId }}..."
+          if [ -n "$MORPHE_CLI_JAR" ] && [ -f "$MPP_FILE" ]; then
+            echo "Querying morphe-cli list-versions for ${{ matrix.appId }} (using $MORPHE_CLI_JAR)..."
             MORPHE_CLI_OUTPUT="$(
-              java -jar "$TOOLS_DIR/morphe-cli.jar" \
+              java -jar "$MORPHE_CLI_JAR" \
                 list-versions -f "${{ matrix.appId }}" \
                 --patches="$MPP_FILE" 2>/dev/null || true
             )"
