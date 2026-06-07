@@ -2054,3 +2054,15 @@ jobs:
             git fetch origin "${BRANCH_NAME}"
             git rebase "origin/${BRANCH_NAME}"
           done
+
+      - name: Prune stale GitHub Actions caches
+        if: github.event_name != 'pull_request'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          echo "Listing and pruning stale project caches (keeping the in-use version + 1 backup)..."
+          node .github/scripts/cleanup-caches.js --apply
+          echo "Cache pruning complete (any failures were logged but did not fail this step)."

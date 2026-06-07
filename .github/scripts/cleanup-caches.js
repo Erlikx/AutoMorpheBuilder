@@ -1,0 +1,263 @@
+#!/usr/bin/env node
+
+/**
+ * Clean up stale GitHub Actions caches for the AutoMorpheBuilder project.
+ *
+ * Caches accumulate because several `actions/cache` steps are keyed by
+ * morphe-cli version, morphe-patches tag, or per-app APK version. Each new
+ * version creates a new cache entry, and GitHub's default cache eviction
+ * only removes entries that haven't been accessed in 7 days - which means
+ * superseded versions linger for up to a week after being replaced.
+ *
+ * This script identifies the *currently in use* version for each cache
+ * pattern (from state.json / config.json) and deletes all other matching
+ * caches. It always keeps:
+ *   - the entry matching the current version (to avoid breaking in-flight runs)
+ *   - one previous version as a safety backup
+ *
+ * Run modes:
+ *   node cleanup-caches.js            # dry-run, prints what would be deleted
+ *   node cleanup-caches.js --apply    # actually delete the stale entries
+ *
+ * Required env:
+ *   GH_TOKEN         - GitHub token with `actions:write` scope
+ *   GITHUB_REPOSITORY - owner/repo (set automatically by GitHub Actions)
+ *
+ * Exits 0 on success (or if there is nothing to do), non-zero on error.
+ */
+
+const { execFileSync } = require('node:child_process');
+const fs = require('node:fs');
+const path = require('node:path');
+
+const APPLY = process.argv.includes('--apply');
+const REPO =
+  process.env.GITHUB_REPOSITORY ||
+  (() => {
+    // Fall back to the git origin if GH_REPOSITORY isn't set (local dev).
+    try {
+      const origin = execFileSync('git', ['remote', 'get-url', 'origin'], {
+        encoding: 'utf8',
+      }).trim();
+      const m = origin.match(/[:/]([\w.-]+)\/([\w.-]+?)(?:\.git)?$/);
+      if (m) return `${m[1]}/${m[2]}`;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(
+      'GITHUB_REPOSITORY is not set and could not be inferred from git origin. ' +
+        'Set it (e.g. export GITHUB_REPOSITORY=owner/repo) or run from a CI runner.'
+    );
+  })();
+
+const CACHE_PATTERNS = {
+  'morphe-cli-': 'cli',
+  'morphe-tools-cli-': 'cli',
+  'morphe-patches-': 'patches',
+  'apk-': 'apk',
+};
+
+function loadState() {
+  const p = path.join(process.cwd(), 'state.json');
+  if (!fs.existsSync(p)) return null;
+  return JSON.parse(fs.readFileSync(p, 'utf8'));
+}
+
+function loadConfig() {
+  const p = path.join(process.cwd(), 'config.json');
+  if (!fs.existsSync(p)) return null;
+  return JSON.parse(fs.readFileSync(p, 'utf8'));
+}
+
+/**
+ * Compute the set of "active" cache keys (full keys) that must be kept
+ * regardless of age. Each pattern may have multiple active keys (e.g. one
+ * per app for the apk pattern).
+ *
+ * @returns {string[]} Set of full cache keys to keep.
+ */
+function computeActiveKeys() {
+  const state = loadState();
+  const config = loadConfig();
+  const active = new Set();
+
+  // --- morphe-cli-* and morphe-tools-cli-* (keyed on cli_version) ---
+  const cliVersion = state?.cli_version;
+  if (cliVersion) {
+    const bare = cliVersion.replace(/^v/, '');
+    active.add(`morphe-cli-${cliVersion}`);
+    active.add(`morphe-cli-v${bare}`); // tolerate missing 'v' prefix
+    active.add(`morphe-tools-cli-${cliVersion}-repos-`);
+  }
+
+  // --- morphe-patches-<slug>-<tag> (keyed on per-repo patches version) ---
+  const patches = state?.patches;
+  if (patches && typeof patches === 'object') {
+    for (const [repo, info] of Object.entries(patches)) {
+      if (!info?.version) continue;
+      const slug = repo.replace(/\//g, '-');
+      active.add(`morphe-patches-${slug}-${info.version}`);
+    }
+  }
+
+  // --- apk-<appId>-<version> (keyed per app) ---
+  if (config) {
+    const patchRepos = config.patch_repos || {};
+    const downloadUrls = config.download_urls || {};
+    for (const [appId, info] of Object.entries(patchRepos)) {
+      // Pinned version wins.
+      if (info.pin_version) {
+        active.add(`apk-${appId}-${info.pin_version}`);
+      }
+      // Otherwise, keep the version whose URL is the "latest_supported".
+      // We can't know the version from a URL alone, so we keep the bare
+      // apk-<appId>- prefix entry as a soft match (any apk cache for this
+      // app is "in use" until the next build writes a new one).
+      if (downloadUrls[appId]?.latest_supported) {
+        active.add(`apk-${appId}-`);
+      }
+    }
+  }
+
+  return [...active];
+}
+
+function listCaches() {
+  // gh cache list returns JSON when --json is set. id + key + createdAt is
+  // the minimum we need.
+  const out = execFileSync(
+    'gh',
+    [
+      'cache',
+      'list',
+      '--repo',
+      REPO,
+      '--json',
+      'id,key,createdAt,sizeInBytes',
+      '--limit',
+      '500',
+    ],
+    { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 }
+  );
+  return JSON.parse(out);
+}
+
+function classifyCache(cache) {
+  for (const prefix of Object.keys(CACHE_PATTERNS)) {
+    if (cache.key.startsWith(prefix)) return prefix;
+  }
+  return null;
+}
+
+function isActive(cacheKey, activeKeys) {
+  for (const active of activeKeys) {
+    if (active.endsWith('-') && cacheKey.startsWith(active)) return true;
+    if (cacheKey === active) return true;
+  }
+  return false;
+}
+
+function deleteCache(cache) {
+  execFileSync('gh', ['cache', 'delete', cache.id, '--repo', REPO, '--yes'], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+}
+
+function formatSize(bytes) {
+  if (!bytes) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let v = bytes;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${v.toFixed(1)} ${units[i]}`;
+}
+
+function main() {
+  console.log(`Repository: ${REPO}`);
+  console.log(`Mode: ${APPLY ? 'APPLY' : 'DRY-RUN (use --apply to actually delete)'}`);
+
+  const activeKeys = computeActiveKeys();
+  console.log(`\nActive keys to preserve (${activeKeys.length}):`);
+  for (const k of activeKeys) console.log(`  ${k}`);
+
+  let caches;
+  try {
+    caches = listCaches();
+  } catch (e) {
+    console.error(`Failed to list caches: ${e.message}`);
+    process.exit(1);
+  }
+
+  console.log(`\nTotal project-related caches: ${caches.length}`);
+
+  // Group by pattern, sort each by createdAt desc (newest first).
+  const byPattern = new Map();
+  for (const c of caches) {
+    const pattern = classifyCache(c);
+    if (!pattern) continue; // not ours
+    if (!byPattern.has(pattern)) byPattern.set(pattern, []);
+    byPattern.get(pattern).push(c);
+  }
+  for (const group of byPattern.values()) {
+    group.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+  }
+
+  // Build a "safe-to-keep" set: anything matching the active keys, plus
+  // the single newest cache per pattern as a safety backup.
+  const safeToKeep = new Set(activeKeys);
+  for (const [pattern, group] of byPattern.entries()) {
+    if (group[0]) safeToKeep.add(group[0].key);
+  }
+
+  // Now collect the deletion candidates: project caches that aren't safe.
+  const toDelete = [];
+  let bytesToFree = 0;
+  for (const group of byPattern.values()) {
+    for (const c of group) {
+      if (!isActive(c.key, [...safeToKeep])) {
+        toDelete.push(c);
+        bytesToFree += c.sizeInBytes || 0;
+      }
+    }
+  }
+
+  if (toDelete.length === 0) {
+    console.log('\nNothing to clean up - all caches are either active or kept as backup.');
+    return;
+  }
+
+  console.log(
+    `\n${APPLY ? 'Deleting' : 'Would delete'} ${toDelete.length} stale caches ` +
+      `(recovering ~${formatSize(bytesToFree)}):`
+  );
+  for (const c of toDelete) {
+    console.log(`  - ${c.key}  (${formatSize(c.sizeInBytes)}, id=${c.id}, created=${c.createdAt})`);
+  }
+
+  if (!APPLY) {
+    console.log('\nRe-run with --apply to actually delete these caches.');
+    return;
+  }
+
+  let failed = 0;
+  for (const c of toDelete) {
+    try {
+      deleteCache(c);
+      console.log(`  deleted ${c.key}`);
+    } catch (e) {
+      failed++;
+      console.error(`  FAILED to delete ${c.key}: ${e.message}`);
+    }
+  }
+  if (failed > 0) {
+    console.error(`\n${failed} cache(s) failed to delete.`);
+    process.exit(1);
+  }
+  console.log(`\nDone. Deleted ${toDelete.length} stale cache(s).`);
+}
+
+main();
