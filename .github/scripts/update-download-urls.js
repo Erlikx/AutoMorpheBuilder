@@ -60,6 +60,23 @@ function main() {
     config.download_urls[packageId][version] = url;
     config.download_urls[packageId].latest_supported = url;
 
+    // Prune stale per-version entries. We only ever consume
+    // .download_urls[pkg].latest_supported at build time (morphe-build.yml
+    // uses the shortcut key, not the per-version key), so older per-version
+    // entries are dead weight. Keep the entry we just wrote plus
+    // latest_supported; drop the rest. This also matches the
+    // "no longer used" intent — once a new version supersedes an old one,
+    // its cached URL is no longer needed.
+    const STALE_KEYS = Object.keys(config.download_urls[packageId]).filter(
+      k => k !== version && k !== 'latest_supported'
+    );
+    for (const k of STALE_KEYS) {
+      delete config.download_urls[packageId][k];
+    }
+    if (STALE_KEYS.length > 0) {
+      console.error(`Pruned ${STALE_KEYS.length} stale download_urls entries for ${packageId}: ${STALE_KEYS.join(', ')}`);
+    }
+
     fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf8');
 
     console.log(JSON.stringify({
