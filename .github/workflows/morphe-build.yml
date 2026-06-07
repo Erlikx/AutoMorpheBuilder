@@ -1537,6 +1537,11 @@ jobs:
 
           PATCH_LOG="$RUNNER_TEMP/morphe_patch_${{ matrix.name }}.log"
           PATCH_TMP_DIR="$RUNNER_TEMP/morphe_${{ matrix.name }}"
+          # morphe-cli's default output location is apps/<basename>/<basename>-Morphe-<ver>.apk,
+          # which the find-based discovery below can't reach with -maxdepth 1. Pin the output
+          # to a deterministic temp path so we know exactly where the patched APK is.
+          PATCHED_APK="$RUNNER_TEMP/morphe_${{ matrix.name }}_patched.apk"
+          rm -f "$PATCHED_APK"
 
           run_patch() {
             local mode="$1"
@@ -1553,6 +1558,7 @@ jobs:
             local -a cmd=(java -jar "$JAR" patch --patches="$MPP")
             cmd+=("${KEY_ARGS[@]}")
             cmd+=(--temporary-files-path="$PATCH_TMP_DIR" --purge)
+            cmd+=(--out="$PATCHED_APK")
             cmd+=("${PATCH_ARGS[@]}")
             cmd+=("$APK")
             printf '%s\0' "${cmd[@]}"
@@ -1567,27 +1573,17 @@ jobs:
             exit 1
           fi
 
-          # Collect output: prefer APKs newer than marker and not equal to input APK.
-          OUT_APK="$( \
-            { find . -maxdepth 1 -type f -name "*.apk" -newer "$MARKER" -printf '%T@ %p\n' || true; \
-              find "$APKS_DIR" -maxdepth 1 -type f -name "*.apk" -newer "$MARKER" -printf '%T@ %p\n' || true; } \
-            | sort -nr \
-            | cut -d' ' -f2- \
-            | awk -v apk="$APK_NORM" '
-                {
-                  line=$0
-                  sub(/^\.\//, "", line)
-                  if (line != "" && line != apk && out == "") out=line
-                }
-                END { if (out != "") print out }
-              ' \
-          )"
-
-          # Fallback: pick newest non-input APK if timestamps are not reliable.
-          if [ -z "$OUT_APK" ] || [ ! -f "$OUT_APK" ]; then
+          # Primary path: morphe-cli was invoked with --out="$PATCHED_APK", so the
+          # patched APK should be at that deterministic location. Fall back to a
+          # scan of the current dir / APKS_DIR if --out wasn't honored for any reason.
+          OUT_APK=""
+          if [ -f "$PATCHED_APK" ]; then
+            OUT_APK="$PATCHED_APK"
+          else
+            # Collect output: prefer APKs newer than marker and not equal to input APK.
             OUT_APK="$( \
-              { find . -maxdepth 1 -type f -name "*.apk" -printf '%T@ %p\n' || true; \
-                find "$APKS_DIR" -maxdepth 1 -type f -name "*.apk" -printf '%T@ %p\n' || true; } \
+              { find . -maxdepth 1 -type f -name "*.apk" -newer "$MARKER" -printf '%T@ %p\n' || true; \
+                find "$APKS_DIR" -maxdepth 1 -type f -name "*.apk" -newer "$MARKER" -printf '%T@ %p\n' || true; } \
               | sort -nr \
               | cut -d' ' -f2- \
               | awk -v apk="$APK_NORM" '
@@ -1599,16 +1595,35 @@ jobs:
                   END { if (out != "") print out }
                 ' \
             )"
+
+            # Fallback: pick newest non-input APK if timestamps are not reliable.
+            if [ -z "$OUT_APK" ] || [ ! -f "$OUT_APK" ]; then
+              OUT_APK="$( \
+                { find . -maxdepth 1 -type f -name "*.apk" -printf '%T@ %p\n' || true; \
+                  find "$APKS_DIR" -maxdepth 1 -type f -name "*.apk" -printf '%T@ %p\n' || true; } \
+                | sort -nr \
+                | cut -d' ' -f2- \
+                | awk -v apk="$APK_NORM" '
+                    {
+                      line=$0
+                      sub(/^\.\//, "", line)
+                      if (line != "" && line != apk && out == "") out=line
+                    }
+                    END { if (out != "") print out }
+                  ' \
+              )"
+            fi
           fi
           if [ -z "$OUT_APK" ] || [ ! -f "$OUT_APK" ]; then
             echo "::error::Could not locate patched APK output"
+            echo "Expected at: $PATCHED_APK"
             echo "Files in current directory:"
             ls -la
             echo "Files in $APKS_DIR:"
             ls -la "$APKS_DIR" || true
             exit 1
           fi
-          
+
           # Rename with version info
           OUTPUT_NAME="${{ matrix.name }}-v${APK_VERSION}-${PATCH_TAG}.apk"
           mv "$OUT_APK" "$OUT_DIR/$OUTPUT_NAME"
