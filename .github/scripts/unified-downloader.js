@@ -232,7 +232,48 @@ function saveCachedUrl(packageId, version, url, source) {
   fs.writeFileSync(cacheFile, JSON.stringify(newCacheData, null, 2));
   console.error(`[url-cache] Saved: ${packageId} v${version} from ${source}`);
 
+  // Prune older version entries to prevent unbounded growth.
+  cleanupOldUrls(packageId);
+
   return cacheFile;
+}
+
+/**
+ * Prune URL cache entries for a package, keeping only the most-recently
+ * updated ones. Mirrors cleanupOldVersions() used for the APK cache.
+ * @param {string} packageId
+ * @param {number} keep Number of most-recent entries to retain (default 3).
+ */
+function cleanupOldUrls(packageId, keep = 3) {
+  const cacheDir = path.join(URL_CACHE_DIR, packageId);
+  if (!fs.existsSync(cacheDir)) {
+    return 0;
+  }
+
+  const entries = fs.readdirSync(cacheDir)
+    .filter(f => f.endsWith(".json"))
+    .map(f => {
+      const fp = path.join(cacheDir, f);
+      try {
+        const stat = fs.statSync(fp);
+        return { file: fp, mtime: stat.mtimeMs };
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.mtime - a.mtime);
+
+  const toDelete = entries.slice(keep);
+  for (const entry of toDelete) {
+    try {
+      fs.unlinkSync(entry.file);
+      console.error(`[url-cache] Pruned old entry: ${entry.file}`);
+    } catch (e) {
+      console.error(`[url-cache] Failed to prune ${entry.file}: ${e.message}`);
+    }
+  }
+  return toDelete.length;
 }
 
 /**
@@ -1853,4 +1894,5 @@ module.exports = {
   selectVariant,
   collectCookies,
   resolveApkmirrorUrl,
+  cleanupOldUrls,
 };
