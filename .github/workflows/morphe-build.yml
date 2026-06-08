@@ -228,23 +228,56 @@ jobs:
         if: steps.version-check.outputs.should-build == 'true'
         continue-on-error: true
         env:
-          # The Microsoft Playwright CDN (cdn.playwright.dev / its azure
-          # mirror) has been returning 307→400 for the CFT zip on these
-          # runners (cancelled run 27103019382 hung 2h; subsequent runs
-          # 404 instantly via storage.googleapis.com). Try the GCS bucket
-          # first; if its path scheme doesn't match, fall back to the
-          # default mirror. install is best-effort — Playwright is only
-          # the 3rd-tier APKMirror-scraper fallback, so a missing browser
-          # is non-fatal as long as apkeep / apkmirror-api can resolve.
+          # Force Playwright to use the public GCS bucket (its cdn.playwright.dev
+          # redirector has been unreliable on these runners; the bucket
+          # itself is fast and reachable). Note: Playwright's URL template
+          # includes a `builds/cft/` prefix that the GCS bucket does NOT
+          # have, so we patch the registry code to use the bucket's actual
+          # path scheme (`<version>/<platform>/<artifact>.zip`).
           PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST: https://storage.googleapis.com/chrome-for-testing-public
         run: |
           set -euo pipefail
           echo "Installing Playwright Chromium (best-effort)..."
+          # Playwright's path template is `builds/cft/{version}/...`; the GCS
+          # bucket uses `{version}/...`. Strip the `builds/cft/` prefix from
+          # the template so downloads land on the right path. This is a
+          # monkey-patch of the *download URL template*, not the install
+          # behavior — Playwright will still place the binary in the
+          # canonical `~/.cache/ms-playwright/chromium-*/...` location.
+          cat > /tmp/pw-patch.js <<'JS'
+          const Module = require('module');
+          const origResolve = Module._resolveFilename;
+          Module._resolveFilename = function (req, parent, ...rest) {
+            const r = origResolve.call(this, req, parent, ...rest);
+            if (r && r.includes('playwright-core/lib/server/registry/index.js')) {
+              try {
+                const fs = require('fs');
+                let src = fs.readFileSync(r, 'utf8');
+                // The template literal is `builds/cft/${...}/${suffix}`. Replace
+                // the `builds/cft/` prefix with empty string in the cft path
+                // template so it matches the GCS bucket layout.
+                src = src.replace(/`builds\/cft\/\$\{browserVersion\}\/\$\{suffix\}`/g,
+                                  '`${browserVersion}/${suffix}`');
+                if (!src.includes('// patched')) {
+                  src = '// patched\n' + src;
+                }
+                const tmp = r + '.patched.js';
+                if (!fs.existsSync(tmp) || fs.readFileSync(tmp, 'utf8') !== src) {
+                  fs.writeFileSync(tmp, src);
+                }
+                return tmp;
+              } catch (e) {
+                return r;
+              }
+            }
+            return r;
+          };
+          JS
           # 5 min ceiling — fail fast instead of hanging the workflow.
-          timeout 300 npx playwright install chromium || \
+          NODE_OPTIONS="--require=/tmp/pw-patch.js" timeout 300 npx playwright install chromium || \
             echo "::warning::playwright install failed; APKMirror Playwright fallback will be unavailable, but apkeep / apkmirror-api will still work"
           if command -v sudo >/dev/null 2>&1; then
-            timeout 180 npx playwright install --with-deps chromium || \
+            NODE_OPTIONS="--require=/tmp/pw-patch.js" timeout 180 npx playwright install --with-deps chromium || \
               echo "::warning::playwright install-deps failed or timed out; relying on launcher fallbacks"
           else
             echo "sudo not available; skipping system-deps install"
@@ -623,8 +656,7 @@ jobs:
       - name: Install Playwright browsers (fallback if artifact not available)
         continue-on-error: true
         env:
-          # Mirror the check-versions host override so the build job's
-          # fallback install uses the same fast Google storage endpoint.
+          # Same GCS mirror + path-patch as check-versions (see comments there).
           PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST: https://storage.googleapis.com/chrome-for-testing-public
         run: |
           set -euo pipefail
@@ -638,7 +670,29 @@ jobs:
           # Install if not present at all. 5 min ceiling, best-effort.
           if ! find "$HOME/.cache/ms-playwright" -name 'chrome' 2>/dev/null | grep -q . \
              && ! find "$HOME/.cache/ms-playwright" -name 'chrome-headless-shell' 2>/dev/null | grep -q .; then
-            timeout 300 npx playwright install chromium || \
+            # Apply the same cft-path patch as the check-versions install step.
+            cat > /tmp/pw-patch.js <<'JS'
+            const Module = require('module');
+            const origResolve = Module._resolveFilename;
+            Module._resolveFilename = function (req, parent, ...rest) {
+              const r = origResolve.call(this, req, parent, ...rest);
+              if (r && r.includes('playwright-core/lib/server/registry/index.js')) {
+                try {
+                  const fs = require('fs');
+                  let src = fs.readFileSync(r, 'utf8');
+                  src = src.replace(/`builds\/cft\/\$\{browserVersion\}\/\$\{suffix\}`/g,
+                                    '`${browserVersion}/${suffix}`');
+                  const tmp = r + '.patched.js';
+                  if (!fs.existsSync(tmp) || fs.readFileSync(tmp, 'utf8') !== src) {
+                    fs.writeFileSync(tmp, src);
+                  }
+                  return tmp;
+                } catch (e) { return r; }
+              }
+              return r;
+            };
+            JS
+            NODE_OPTIONS="--require=/tmp/pw-patch.js" timeout 300 npx playwright install chromium || \
               echo "::warning::playwright fallback install failed; APKMirror scraper will be unavailable"
           fi
 
