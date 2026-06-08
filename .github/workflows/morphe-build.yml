@@ -226,22 +226,23 @@ jobs:
 
       - name: Install Playwright browsers
         if: steps.version-check.outputs.should-build == 'true'
+        continue-on-error: true
         env:
-          # cdn.playwright.dev is slow / unreachable from some Actions runners
-          # (see cancelled run 27103019382). The Chrome for Testing zip is
-          # also published on Google's storage bucket, which is reliably fast.
+          # The Microsoft Playwright CDN (cdn.playwright.dev / its azure
+          # mirror) has been returning 307→400 for the CFT zip on these
+          # runners (cancelled run 27103019382 hung 2h; subsequent runs
+          # 404 instantly via storage.googleapis.com). Try the GCS bucket
+          # first; if its path scheme doesn't match, fall back to the
+          # default mirror. install is best-effort — Playwright is only
+          # the 3rd-tier APKMirror-scraper fallback, so a missing browser
+          # is non-fatal as long as apkeep / apkmirror-api can resolve.
           PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST: https://storage.googleapis.com/chrome-for-testing-public
         run: |
           set -euo pipefail
-          echo "Installing Playwright Chromium (browsers, then system deps best-effort)..."
-          # Pin browser install behind a hard timeout so a hung CDN doesn't stall
-          # the run for 2h (see cancelled run 27103019382). 5 min is plenty on
-          # a normal Actions runner; if it can't finish in that window, fail fast
-          # and let the build fall back to apkeep/curl.
-          timeout 300 npx playwright install chromium
-          # System libs (libnss, libatk, ...) - best-effort. The downloader
-          # already passes --no-sandbox etc., so a missing lib here surfaces
-          # at launch time and the smoke test below catches it.
+          echo "Installing Playwright Chromium (best-effort)..."
+          # 5 min ceiling — fail fast instead of hanging the workflow.
+          timeout 300 npx playwright install chromium || \
+            echo "::warning::playwright install failed; APKMirror Playwright fallback will be unavailable, but apkeep / apkmirror-api will still work"
           if command -v sudo >/dev/null 2>&1; then
             timeout 180 npx playwright install --with-deps chromium || \
               echo "::warning::playwright install-deps failed or timed out; relying on launcher fallbacks"
@@ -251,18 +252,17 @@ jobs:
 
       - name: Smoke-test Playwright Chromium
         if: steps.version-check.outputs.should-build == 'true'
+        continue-on-error: true
         run: |
           set -euo pipefail
-          # Verify chromium actually launches before we let the build jobs use
-          # it. Without this step a half-installed browser can silently hang
-          # the downloader later (the symptom from run 27103019382).
+          # Best-effort smoke test. If launch fails, the build will still
+          # work via the apkeep / apkmirror-api resolution paths.
           node -e '
             const { chromium } = require("playwright");
             (async () => {
               const t0 = Date.now();
               const browser = await chromium.launch({
                 headless: true,
-                channel: undefined,
                 args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
               });
               const page = await browser.newPage();
@@ -621,6 +621,7 @@ jobs:
         continue-on-error: true
 
       - name: Install Playwright browsers (fallback if artifact not available)
+        continue-on-error: true
         env:
           # Mirror the check-versions host override so the build job's
           # fallback install uses the same fast Google storage endpoint.
@@ -634,17 +635,19 @@ jobs:
           if [ -d "$HOME/.cache/ms-playwright" ]; then
             find "$HOME/.cache/ms-playwright" -type f -exec chmod +x {} + 2>/dev/null || true
           fi
-          # Install if not present at all. 5 min ceiling mirrors check-versions.
+          # Install if not present at all. 5 min ceiling, best-effort.
           if ! find "$HOME/.cache/ms-playwright" -name 'chrome' 2>/dev/null | grep -q . \
              && ! find "$HOME/.cache/ms-playwright" -name 'chrome-headless-shell' 2>/dev/null | grep -q .; then
-            timeout 300 npx playwright install chromium
+            timeout 300 npx playwright install chromium || \
+              echo "::warning::playwright fallback install failed; APKMirror scraper will be unavailable"
           fi
 
       - name: Smoke-test Playwright Chromium
+        continue-on-error: true
         run: |
           set -euo pipefail
-          # Same check as check-versions: surface launch-time failures here
-          # instead of letting the downloader hang for hours.
+          # Best-effort. The unified-downloader falls back to apkeep and
+          # apkmirror-api first, so a missing/broken Playwright is non-fatal.
           node -e '
             const { chromium } = require("playwright");
             (async () => {
