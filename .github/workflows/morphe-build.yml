@@ -220,13 +220,52 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-chromium-${{ hashFiles('package.json') }}
+          key: playwright-${{ runner.os }}-chromium-${{ hashFiles('package.json', 'package-lock.json') }}
           restore-keys: |
             playwright-${{ runner.os }}-chromium-
 
       - name: Install Playwright browsers
         if: steps.version-check.outputs.should-build == 'true'
-        run: npx playwright install chromium
+        run: |
+          set -euo pipefail
+          echo "Installing Playwright Chromium (browsers, then system deps best-effort)..."
+          # Pin browser install behind a hard timeout so a hung CDN doesn't stall
+          # the run for 2h (see cancelled run 27103019382). 5 min is plenty on
+          # a normal Actions runner; if it can't finish in that window, fail fast
+          # and let the build fall back to apkeep/curl.
+          timeout 300 npx playwright install chromium
+          # System libs (libnss, libatk, ...) - best-effort. The downloader
+          # already passes --no-sandbox etc., so a missing lib here surfaces
+          # at launch time and the smoke test below catches it.
+          if command -v sudo >/dev/null 2>&1; then
+            timeout 180 npx playwright install --with-deps chromium || \
+              echo "::warning::playwright install-deps failed or timed out; relying on launcher fallbacks"
+          else
+            echo "sudo not available; skipping system-deps install"
+          fi
+
+      - name: Smoke-test Playwright Chromium
+        if: steps.version-check.outputs.should-build == 'true'
+        run: |
+          set -euo pipefail
+          # Verify chromium actually launches before we let the build jobs use
+          # it. Without this step a half-installed browser can silently hang
+          # the downloader later (the symptom from run 27103019382).
+          node -e '
+            const { chromium } = require("playwright");
+            (async () => {
+              const t0 = Date.now();
+              const browser = await chromium.launch({
+                headless: true,
+                channel: undefined,
+                args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+              });
+              const page = await browser.newPage();
+              const ua = await page.evaluate(() => navigator.userAgent);
+              console.log("Chromium launched OK in", Date.now() - t0, "ms, UA:", ua);
+              await browser.close();
+            })().catch((e) => { console.error("Chromium smoke-test FAILED:", e.message); process.exit(1); });
+          '
 
       - name: Upload Playwright browsers for build jobs
         if: steps.version-check.outputs.should-build == 'true'
@@ -578,12 +617,37 @@ jobs:
 
       - name: Install Playwright browsers (fallback if artifact not available)
         run: |
-          # Restore execute permissions lost during artifact upload/download
-          find ~/.cache/ms-playwright -name 'chrome-headless-shell' -o -name 'chrome' 2>/dev/null | xargs -r chmod +x
-          # Install if not present at all
-          if ! find ~/.cache/ms-playwright -name 'chrome-headless-shell' 2>/dev/null | grep -q .; then
-            npx playwright install chromium
+          set -euo pipefail
+          # Restore execute permissions lost during artifact upload/download.
+          # The whole chromium-* dir needs +x (chrome, headless_shell, sandbox,
+          # crashpad_handler, ...) — the old glob only covered two binaries and
+          # was the reason launches hung silently on the cancelled run.
+          if [ -d "$HOME/.cache/ms-playwright" ]; then
+            find "$HOME/.cache/ms-playwright" -type f -exec chmod +x {} + 2>/dev/null || true
           fi
+          # Install if not present at all. 5 min ceiling mirrors check-versions.
+          if ! find "$HOME/.cache/ms-playwright" -name 'chrome' 2>/dev/null | grep -q . \
+             && ! find "$HOME/.cache/ms-playwright" -name 'chrome-headless-shell' 2>/dev/null | grep -q .; then
+            timeout 300 npx playwright install chromium
+          fi
+
+      - name: Smoke-test Playwright Chromium
+        run: |
+          set -euo pipefail
+          # Same check as check-versions: surface launch-time failures here
+          # instead of letting the downloader hang for hours.
+          node -e '
+            const { chromium } = require("playwright");
+            (async () => {
+              const t0 = Date.now();
+              const browser = await chromium.launch({
+                headless: true,
+                args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+              });
+              await browser.close();
+              console.log("Chromium OK in", Date.now() - t0, "ms");
+            })().catch((e) => { console.error("Chromium smoke-test FAILED:", e.message); process.exit(1); });
+          '
 
       - name: Cache patches .mpp
         uses: actions/cache@v5
