@@ -226,6 +226,11 @@ jobs:
 
       - name: Install Playwright browsers
         if: steps.version-check.outputs.should-build == 'true'
+        env:
+          # cdn.playwright.dev is slow / unreachable from some Actions runners
+          # (see cancelled run 27103019382). The Chrome for Testing zip is
+          # also published on Google's storage bucket, which is reliably fast.
+          PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST: https://storage.googleapis.com/chrome-for-testing-public
         run: |
           set -euo pipefail
           echo "Installing Playwright Chromium (browsers, then system deps best-effort)..."
@@ -616,6 +621,10 @@ jobs:
         continue-on-error: true
 
       - name: Install Playwright browsers (fallback if artifact not available)
+        env:
+          # Mirror the check-versions host override so the build job's
+          # fallback install uses the same fast Google storage endpoint.
+          PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST: https://storage.googleapis.com/chrome-for-testing-public
         run: |
           set -euo pipefail
           # Restore execute permissions lost during artifact upload/download.
