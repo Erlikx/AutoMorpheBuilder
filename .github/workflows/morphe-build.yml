@@ -230,54 +230,21 @@ jobs:
         env:
           # Force Playwright to use the public GCS bucket (its cdn.playwright.dev
           # redirector has been unreliable on these runners; the bucket
-          # itself is fast and reachable). Note: Playwright's URL template
+          # itself is fast and reachable). Playwright's URL template
           # includes a `builds/cft/` prefix that the GCS bucket does NOT
-          # have, so we patch the registry code to use the bucket's actual
-          # path scheme (`<version>/<platform>/<artifact>.zip`).
+          # have — patch-playwright-cft-path.js strips that prefix at
+          # module-resolution time so the URL matches the bucket layout.
           PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST: https://storage.googleapis.com/chrome-for-testing-public
         run: |
           set -euo pipefail
           echo "Installing Playwright Chromium (best-effort)..."
-          # Playwright's path template is `builds/cft/{version}/...`; the GCS
-          # bucket uses `{version}/...`. Strip the `builds/cft/` prefix from
-          # the template so downloads land on the right path. This is a
-          # monkey-patch of the *download URL template*, not the install
-          # behavior — Playwright will still place the binary in the
-          # canonical `~/.cache/ms-playwright/chromium-*/...` location.
-          cat > /tmp/pw-patch.js <<'JS'
-          const Module = require('module');
-          const origResolve = Module._resolveFilename;
-          Module._resolveFilename = function (req, parent, ...rest) {
-            const r = origResolve.call(this, req, parent, ...rest);
-            if (r && r.includes('playwright-core/lib/server/registry/index.js')) {
-              try {
-                const fs = require('fs');
-                let src = fs.readFileSync(r, 'utf8');
-                // The template literal is `builds/cft/${...}/${suffix}`. Replace
-                // the `builds/cft/` prefix with empty string in the cft path
-                // template so it matches the GCS bucket layout.
-                src = src.replace(/`builds\/cft\/\$\{browserVersion\}\/\$\{suffix\}`/g,
-                                  '`${browserVersion}/${suffix}`');
-                if (!src.includes('// patched')) {
-                  src = '// patched\n' + src;
-                }
-                const tmp = r + '.patched.js';
-                if (!fs.existsSync(tmp) || fs.readFileSync(tmp, 'utf8') !== src) {
-                  fs.writeFileSync(tmp, src);
-                }
-                return tmp;
-              } catch (e) {
-                return r;
-              }
-            }
-            return r;
-          };
-          JS
           # 5 min ceiling — fail fast instead of hanging the workflow.
-          NODE_OPTIONS="--require=/tmp/pw-patch.js" timeout 300 npx playwright install chromium || \
+          NODE_OPTIONS="--require=$GITHUB_WORKSPACE/.github/scripts/patch-playwright-cft-path.js" \
+            timeout 300 npx playwright install chromium || \
             echo "::warning::playwright install failed; APKMirror Playwright fallback will be unavailable, but apkeep / apkmirror-api will still work"
           if command -v sudo >/dev/null 2>&1; then
-            NODE_OPTIONS="--require=/tmp/pw-patch.js" timeout 180 npx playwright install --with-deps chromium || \
+            NODE_OPTIONS="--require=$GITHUB_WORKSPACE/.github/scripts/patch-playwright-cft-path.js" \
+              timeout 180 npx playwright install --with-deps chromium || \
               echo "::warning::playwright install-deps failed or timed out; relying on launcher fallbacks"
           else
             echo "sudo not available; skipping system-deps install"
@@ -670,29 +637,11 @@ jobs:
           # Install if not present at all. 5 min ceiling, best-effort.
           if ! find "$HOME/.cache/ms-playwright" -name 'chrome' 2>/dev/null | grep -q . \
              && ! find "$HOME/.cache/ms-playwright" -name 'chrome-headless-shell' 2>/dev/null | grep -q .; then
-            # Apply the same cft-path patch as the check-versions install step.
-            cat > /tmp/pw-patch.js <<'JS'
-            const Module = require('module');
-            const origResolve = Module._resolveFilename;
-            Module._resolveFilename = function (req, parent, ...rest) {
-              const r = origResolve.call(this, req, parent, ...rest);
-              if (r && r.includes('playwright-core/lib/server/registry/index.js')) {
-                try {
-                  const fs = require('fs');
-                  let src = fs.readFileSync(r, 'utf8');
-                  src = src.replace(/`builds\/cft\/\$\{browserVersion\}\/\$\{suffix\}`/g,
-                                    '`${browserVersion}/${suffix}`');
-                  const tmp = r + '.patched.js';
-                  if (!fs.existsSync(tmp) || fs.readFileSync(tmp, 'utf8') !== src) {
-                    fs.writeFileSync(tmp, src);
-                  }
-                  return tmp;
-                } catch (e) { return r; }
-              }
-              return r;
-            };
-            JS
-            NODE_OPTIONS="--require=/tmp/pw-patch.js" timeout 300 npx playwright install chromium || \
+            # Same GCS mirror + path-patch as check-versions. The patch
+            # is a real file so the heredoc-with-indented-terminator bug
+            # that broke the previous version of this step can't recur.
+            NODE_OPTIONS="--require=$GITHUB_WORKSPACE/.github/scripts/patch-playwright-cft-path.js" \
+              timeout 300 npx playwright install chromium || \
               echo "::warning::playwright fallback install failed; APKMirror scraper will be unavailable"
           fi
 
