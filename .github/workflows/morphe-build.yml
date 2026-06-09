@@ -2150,8 +2150,30 @@ jobs:
             fi
 
             echo "Push rejected (attempt ${attempt}); rebasing on origin/${BRANCH_NAME} and retrying..."
-            git fetch origin "${BRANCH_NAME}"
-            git rebase "origin/${BRANCH_NAME}"
+            # set +e: rebase may exit non-zero on conflict, which is
+            # fine — we'll detect that next iteration and skip our stale
+            # commit (the same version state has already been pushed by
+            # a concurrent run).
+            git fetch origin "${BRANCH_NAME}" || true
+            git rebase "origin/${BRANCH_NAME}" || {
+              rc=$?
+              echo "Rebase conflict (rc=${rc}); checking whether our state is already on origin..."
+              if ! git diff --cached --quiet; then
+                # We had a real change to push. If origin already has the
+                # same content (typical when a concurrent run pushed it
+                # first), drop our local commit and treat as success.
+                if git diff --quiet "origin/${BRANCH_NAME}" -- state.json patches.json config.json; then
+                  echo "origin/${BRANCH_NAME} already has identical state; dropping local commit."
+                  git rebase --abort || true
+                  echo "::notice::Skipped local state commit — origin was already up to date."
+                  exit 0
+                fi
+              fi
+              # Real conflict we can't auto-resolve — bail.
+              git rebase --abort || true
+              echo "::error::Rebase conflict; manual intervention required."
+              exit 1
+            }
           done
 
       - name: Prune stale GitHub Actions caches
