@@ -158,7 +158,11 @@ function isActive(cacheKey, activeKeys) {
 }
 
 function deleteCache(cache) {
-  execFileSync('gh', ['cache', 'delete', cache.id, '--repo', REPO, '--yes'], {
+  // The `gh cache delete` command doesn't actually need a confirmation
+  // flag — it deletes without prompting. The `--yes` flag was added in a
+  // newer version of gh than the one currently on the runner, so we
+  // don't pass it (it would be an "unknown flag" error on older gh).
+  execFileSync('gh', ['cache', 'delete', String(cache.id), '--repo', REPO], {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
   });

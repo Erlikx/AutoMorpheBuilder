@@ -2163,5 +2163,8 @@ jobs:
         run: |
           set -euo pipefail
           echo "Listing and pruning stale project caches (keeping the in-use version + 1 backup)..."
-          node .github/scripts/cleanup-caches.js --apply
-          echo "Cache pruning complete (any failures were logged but did not fail this step)."
+          # Cache pruning is best-effort — its failures (e.g. an old `gh`
+          # that doesn't recognize --yes) shouldn't fail the whole update-state
+          # step, which has already done the work the run needs.
+          node .github/scripts/cleanup-caches.js --apply || echo "::warning::Cache pruning had failures (see above); ignoring."
+          echo "Cache pruning complete."
