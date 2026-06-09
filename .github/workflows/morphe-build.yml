@@ -377,11 +377,11 @@ jobs:
           set -euo pipefail
           echo "Ensuring aapt is available for the unified-downloader..."
           node "$GITHUB_WORKSPACE/.github/scripts/install-aapt.js"
-          # Sanity check — the unified-downloader shells out to `aapt`/`aapt2`
-          # so the binary must be on PATH in the next step too.
+          # Add build-tools to PATH in *this* step too — the `$GITHUB_ENV` line
+          # below only takes effect for subsequent steps.
           export PATH="$ANDROID_HOME/build-tools/34.0.0:$PATH"
           command -v aapt && aapt version | head -1
-          # Persist PATH for the next step via $GITHUB_ENV
+          # Persist for the next step.
           echo "PATH=$ANDROID_HOME/build-tools/34.0.0:$PATH" >> "$GITHUB_ENV"
 
       - name: Download APKs using unified-downloader
@@ -956,11 +956,13 @@ jobs:
         run: |
           set -euo pipefail
           node "$GITHUB_WORKSPACE/.github/scripts/install-aapt.js"
-          # Persist PATH for subsequent steps via $GITHUB_ENV so the
-          # unified-downloader's child processes inherit it.
+          # Add build-tools to PATH in *this* step too — the `$GITHUB_ENV` line
+          # below only takes effect for subsequent steps.
+          export PATH="$ANDROID_HOME/build-tools/34.0.0:$PATH"
+          command -v aapt && aapt version | head -1
+          # Persist for the next step.
           echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
           echo "PATH=$ANDROID_HOME/build-tools/34.0.0:$PATH" >> "$GITHUB_ENV"
-          command -v aapt && aapt version | head -1
 
       - name: Download supported APK for ${{ matrix.appId }}
         id: getapk
