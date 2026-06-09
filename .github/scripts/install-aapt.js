@@ -1,0 +1,140 @@
+#!/usr/bin/env node
+'use strict';
+
+/**
+ * Install aapt + aapt2 for APK version validation.
+ *
+ * Why this exists:
+ *   The workflow's previous "install aapt" block only fetched the Android
+ *   cmdline-tools manager; it never actually ran `sdkmanager` to install
+ *   the build-tools package, which is where the `aapt` and `aapt2` binaries
+ *   live. As a result `command -v aapt` always returned non-zero and the
+ *   unified-downloader's apkeep path would discard every download with
+ *   "aapt not available - cannot validate version", causing builds to fail
+ *   on transient sources like APKMirror rate limits.
+ *
+ *   This installer does the right thing: cmdline-tools → accept licenses
+ *   → sdkmanager install build-tools. Idempotent (skips if aapt is
+ *   already on PATH). Exits non-zero on failure so callers can `|| true`
+ *   to make it best-effort.
+ *
+ * Usage:
+ *   node .github/scripts/install-aapt.js
+ *
+ * After this script, `aapt` and `aapt2` are on PATH.
+ */
+
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { execFileSync, spawnSync } = require('node:child_process');
+
+const SDK_ROOT = process.env.ANDROID_HOME || path.join(os.tmpdir(), 'android-sdk');
+const CMDLINE_TOOLS_URL = 'https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip';
+const BUILD_TOOLS_VERSION = '34.0.0';
+
+function log(msg) {
+  console.error(`[aapt-install] ${msg}`);
+}
+
+function alreadyInstalled() {
+  // If `aapt` is already on PATH (e.g. apt-installed, or a previous
+  // run cached the SDK), don't redo the work.
+  const r = spawnSync('aapt', ['version'], { stdio: 'ignore' });
+  return r.status === 0;
+}
+
+function download(url, dest) {
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  execFileSync('curl', ['-fsSL', '-o', dest, url], { stdio: 'inherit' });
+  const size = fs.statSync(dest).size;
+  if (size < 1_000_000) throw new Error(`Downloaded ${url} is suspiciously small (${size} bytes)`);
+  return dest;
+}
+
+function unzip(zipPath, destDir) {
+  fs.mkdirSync(destDir, { recursive: true });
+  execFileSync('unzip', ['-q', '-o', zipPath, '-d', destDir], { stdio: 'inherit' });
+}
+
+function ensureCmdlineTools() {
+  const sdkMgr = path.join(SDK_ROOT, 'cmdline-tools', 'latest', 'bin', 'sdkmanager');
+  if (fs.existsSync(sdkMgr)) {
+    log(`cmdline-tools already present at ${sdkMgr}`);
+    return;
+  }
+
+  log(`Installing Android cmdline-tools to ${SDK_ROOT}...`);
+  const zip = path.join(os.tmpdir(), 'cmdline-tools.zip');
+  download(CMDLINE_TOOLS_URL, zip);
+
+  // The zip extracts to a top-level "cmdline-tools/" directory; we need it
+  // at $SDK_ROOT/cmdline-tools/latest/ (the layout sdkmanager expects).
+  const staging = path.join(os.tmpdir(), `cmdline-tools-staging-${Date.now()}`);
+  unzip(zip, staging);
+  const src = path.join(staging, 'cmdline-tools');
+  const dest = path.join(SDK_ROOT, 'cmdline-tools', 'latest');
+  fs.mkdirSync(dest, { recursive: true });
+  for (const entry of fs.readdirSync(src)) {
+    fs.renameSync(path.join(src, entry), path.join(dest, entry));
+  }
+  fs.rmSync(staging, { recursive: true, force: true });
+  fs.rmSync(zip, { force: true });
+}
+
+function acceptLicenses() {
+  // Pipe `yes` into sdkmanager --licenses. The first run writes the
+  // license accept record to $SDK_ROOT/licenses/; subsequent runs are no-ops.
+  log('Accepting SDK licenses (idempotent)...');
+  const sdkMgr = path.join(SDK_ROOT, 'cmdline-tools', 'latest', 'bin', 'sdkmanager');
+  // Redirect everything through a shell so stdin is a real pipe.
+  // The license prompt cycles through ~7 licenses; `yes` answers them all,
+  // and the trailing `y/N?` after the last "All accepted" is harmless
+  // because we've already written all accept records.
+  const cmd = `printf 'y\\ny\\ny\\ny\\ny\\ny\\ny\\ny\\n' | "${sdkMgr}" --sdk_root="${SDK_ROOT}" --licenses >/dev/null 2>&1; true`;
+  const r = spawnSync('bash', ['-c', cmd], { stdio: 'inherit' });
+  if (r.status !== 0) {
+    throw new Error(`sdkmanager --licenses exited with code ${r.status}`);
+  }
+}
+
+function installBuildTools() {
+  const aaptPath = path.join(SDK_ROOT, 'build-tools', BUILD_TOOLS_VERSION, 'aapt');
+  if (fs.existsSync(aaptPath)) {
+    log(`build-tools;${BUILD_TOOLS_VERSION} already installed (aapt present)`);
+    return;
+  }
+  log(`Installing build-tools;${BUILD_TOOLS_VERSION}...`);
+  const sdkMgr = path.join(SDK_ROOT, 'cmdline-tools', 'latest', 'bin', 'sdkmanager');
+  // sdkmanager parses --sdk_root=path but not --sdk_root path (no space form).
+  // The licenses subcommand is the same — keep the = form throughout.
+  const r = spawnSync(sdkMgr, [
+    `--sdk_root=${SDK_ROOT}`,
+    `build-tools;${BUILD_TOOLS_VERSION}`,
+  ], { stdio: 'inherit' });
+  if (r.status !== 0) {
+    throw new Error(`sdkmanager install build-tools;${BUILD_TOOLS_VERSION} exited with code ${r.status}`);
+  }
+  if (!fs.existsSync(aaptPath)) {
+    throw new Error(`build-tools install reported success but ${aaptPath} is missing`);
+  }
+}
+
+function main() {
+  if (alreadyInstalled()) {
+    log('aapt is already on PATH — nothing to do');
+    return;
+  }
+  ensureCmdlineTools();
+  acceptLicenses();
+  installBuildTools();
+  log(`Done. aapt is at ${SDK_ROOT}/build-tools/${BUILD_TOOLS_VERSION}/aapt`);
+  log('Caller must add $ANDROID_HOME/build-tools/<ver> to PATH for the unified-downloader to find aapt.');
+}
+
+try {
+  main();
+} catch (e) {
+  console.error(`[aapt-install] FAILED: ${e.message}`);
+  process.exit(1);
+}

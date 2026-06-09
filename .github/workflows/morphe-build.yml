@@ -369,23 +369,31 @@ jobs:
             morphe-tools-cli-${{ steps.version-check.outputs.cli-version }}-
             morphe-tools-
 
+      - name: Install aapt for APK version validation
+        if: steps.version-check.outputs.should-build == 'true'
+        env:
+          ANDROID_HOME: /tmp/android-sdk
+        run: |
+          set -euo pipefail
+          echo "Ensuring aapt is available for the unified-downloader..."
+          node "$GITHUB_WORKSPACE/.github/scripts/install-aapt.js"
+          # Sanity check — the unified-downloader shells out to `aapt`/`aapt2`
+          # so the binary must be on PATH in the next step too.
+          export PATH="$ANDROID_HOME/build-tools/34.0.0:$PATH"
+          command -v aapt && aapt version | head -1
+          # Persist PATH for the next step via $GITHUB_ENV
+          echo "PATH=$ANDROID_HOME/build-tools/34.0.0:$PATH" >> "$GITHUB_ENV"
+
       - name: Download APKs using unified-downloader
         id: download-apks
         if: steps.version-check.outputs.should-build == 'true'
         run: |
           set -euo pipefail
-
-          # Install aapt for version validation in unified-downloader
-          if ! command -v aapt &> /dev/null; then
-            echo "Installing aapt for version validation..."
-            mkdir -p /tmp/android-sdk
-            curl -sSL "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip" -o /tmp/cmdline-tools.zip
-            unzip -q /tmp/cmdline-tools.zip -d /tmp/android-sdk
-            mkdir -p /tmp/android-sdk/cmdline-tools/latest
-            mv /tmp/android-sdk/cmdline-tools/* /tmp/android-sdk/cmdline-tools/latest/ 2>/dev/null || true
-            export ANDROID_HOME=/tmp/android-sdk
-            export PATH="$PATH:$ANDROID_HOME/cmdline-tools/latest/bin"
-          fi
+          # Re-affirm PATH (aapt is needed by the unified-downloader child
+          # processes); $GITHUB_ENV carries it across step boundaries but
+          # being explicit makes failures easier to read.
+          export ANDROID_HOME=/tmp/android-sdk
+          export PATH="$ANDROID_HOME/build-tools/34.0.0:$PATH"
 
           RESULTS_FILE="$RUNNER_TEMP/download_results.json"
           echo "[]" > "$RESULTS_FILE"
@@ -942,6 +950,18 @@ jobs:
           key: apk-${{ matrix.appId }}-${{ steps.targetver.outputs.version }}
           restore-keys: apk-${{ matrix.appId }}-
 
+      - name: Install aapt for APK version validation
+        env:
+          ANDROID_HOME: /tmp/android-sdk
+        run: |
+          set -euo pipefail
+          node "$GITHUB_WORKSPACE/.github/scripts/install-aapt.js"
+          # Persist PATH for subsequent steps via $GITHUB_ENV so the
+          # unified-downloader's child processes inherit it.
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "PATH=$ANDROID_HOME/build-tools/34.0.0:$PATH" >> "$GITHUB_ENV"
+          command -v aapt && aapt version | head -1
+
       - name: Download supported APK for ${{ matrix.appId }}
         id: getapk
         run: |
@@ -1168,16 +1188,9 @@ jobs:
 
             DOWNLOAD_SUCCESS=false
 
-            if ! command -v aapt &> /dev/null; then
-              echo "Installing aapt for version validation..."
-              mkdir -p /tmp/android-sdk
-              curl -sSL "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip" -o /tmp/cmdline-tools.zip
-              unzip -q /tmp/cmdline-tools.zip -d /tmp/android-sdk
-              mkdir -p /tmp/android-sdk/cmdline-tools/latest
-              mv /tmp/android-sdk/cmdline-tools/* /tmp/android-sdk/cmdline-tools/latest/ 2>/dev/null || true
-              export ANDROID_HOME=/tmp/android-sdk
-              export PATH="$PATH:$ANDROID_HOME/cmdline-tools/latest/bin"
-            fi
+            # aapt is installed by the previous step ("Install aapt for APK
+            # version validation"). The unified-downloader child process
+            # inherits PATH from $GITHUB_ENV.
 
             PRELOADED_APK=""
             for ext in apk xapk apkm apks; do
@@ -1247,16 +1260,16 @@ jobs:
 
           echo "Validating APK version matches target v$TARGET_VERSION using aapt..."
 
-          # Ensure aapt is available (comes with android-sdk or can be installed)
+          # aapt is installed by the "Install aapt for APK version validation"
+          # step earlier in this job (PATH is carried via $GITHUB_ENV). Just
+          # make sure it's actually findable here.
           if ! command -v aapt &> /dev/null; then
-            echo "Installing aapt..."
-            mkdir -p /tmp/android-sdk
-            curl -sSL "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip" -o /tmp/cmdline-tools.zip
-            unzip -q /tmp/cmdline-tools.zip -d /tmp/android-sdk
-            mkdir -p /tmp/android-sdk/cmdline-tools/latest
-            mv /tmp/android-sdk/cmdline-tools/* /tmp/android-sdk/cmdline-tools/latest/ 2>/dev/null || true
+            # Fallback for the rare case aapt install step was skipped: run
+            # the same installer inline so we never silently lose validation.
+            echo "::warning::aapt not on PATH; running inline install-aapt.js"
+            node "$GITHUB_WORKSPACE/.github/scripts/install-aapt.js"
             export ANDROID_HOME=/tmp/android-sdk
-            export PATH="$PATH:$ANDROID_HOME/cmdline-tools/latest/bin"
+            export PATH="$ANDROID_HOME/build-tools/34.0.0:$PATH"
           fi
 
           # Find and validate all APK files

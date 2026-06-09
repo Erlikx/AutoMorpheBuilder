@@ -1099,17 +1099,45 @@ async function downloadViaPlaywright(apkmirrorPath, version, outputDir) {
     const page3Url = `https://www.apkmirror.com${dlButtonHref}`;
     console.error(`[apkmirror-pw] Page 3: ${page3Url}`);
     await page.goto(page3Url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    // APKMirror shows a cookie/consent popup on this page that blocks clicks.
+    // The button text is exactly "AGREE" (InMobi CMP). Dismiss it before
+    // trying to click the download link, otherwise the click is intercepted.
+    try {
+      const agreeClicked = await page.evaluate(() => {
+        for (const btn of document.querySelectorAll('button')) {
+          if (/^AGREE$/i.test(btn.textContent.trim())) {
+            btn.click();
+            return true;
+          }
+        }
+        return false;
+      });
+      if (agreeClicked) console.error('[apkmirror-pw] Dismissed consent popup');
+      // Give the popup a moment to collapse
+      await page.waitForTimeout(1500);
+    } catch (e) {
+      // Best-effort — some pages won't have the popup at all
+    }
 
-    // Capture the resolved URL before clicking
+    // The actual download trigger is the #download-link element (not the
+    // generic `a[data-google-interstitial="false"]` selector which matches
+    // ~96 unrelated sidebar nav links on the same page).
     const $3 = cheerio.load(await page.content());
-    const finalHref = $3('a[data-google-interstitial="false"][href]').attr('href');
-    if (!finalHref) throw new Error('Final download link not found on APKMirror download page');
+    const finalHref = $3('#download-link[href]').attr('href');
+    if (!finalHref) {
+      // Fall back to the page-2 download button (the same link, but page 3
+      // usually has the final signed URL with a fresh key). Better to fail
+      // loudly than to silently chase the wrong selector again.
+      throw new Error('Final #download-link not found on APKMirror download page');
+    }
     const finalUrl = finalHref.startsWith('http') ? finalHref : `https://www.apkmirror.com${finalHref}`;
     console.error(`[apkmirror-pw] Resolved URL: ${finalUrl}`);
 
-    // Click the link inside the browser session so cookies are preserved for the download
+    // Click the link inside the browser session so cookies are preserved for the download.
+    // `force: true` because InMobi's overlay sometimes leaves a residual hit-target
+    // even after we clicked AGREE.
     const downloadPromise = page.waitForEvent('download', { timeout: 120000 });
-    await page.click('a[data-google-interstitial="false"]');
+    await page.click('#download-link', { force: true });
     const dl = await downloadPromise;
 
     const suggestedFilename = dl.suggestedFilename() || `${apkmirrorPath.split('/').pop()}_${version}.apk`;
@@ -1250,15 +1278,17 @@ async function resolveApkmirrorUrlViaPlaywright(apkmirrorPath, version, prioriti
     const downloadButtonHref = $2('a.downloadButton[href]').attr('href');
     if (!downloadButtonHref) throw new Error('Download button not found on APKMirror variant page');
 
-    // Page 3: Download page
+    // Page 3: Download page. The actual download URL is the `#download-link`
+    // element (not the generic `a[data-google-interstitial="false"]` selector
+    // which matches ~96 unrelated sidebar nav links on the same page).
     const page3Url = `https://www.apkmirror.com${downloadButtonHref}`;
     console.error(`[apkmirror-scraper] Page 3 (PW): ${page3Url}`);
     await page.goto(page3Url, { waitUntil: 'domcontentloaded', timeout: 30000 });
     const html3 = await page.content();
     const $3 = cheerio.load(html3);
     const finalHref =
-      $3('a[data-google-interstitial="false"][href]').attr('href') ||
-      $3('a[rel=nofollow][href*=".apk"]').attr('href');
+      $3('#download-link[href]').attr('href') ||
+      $3('a[rel=nofollow][href*="download.php"]').attr('href');
     if (!finalHref) throw new Error('Final APK download link not found on APKMirror download page');
 
     const finalUrl = finalHref.startsWith('http')
