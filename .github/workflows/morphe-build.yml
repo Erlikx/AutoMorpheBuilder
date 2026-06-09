@@ -234,21 +234,21 @@ jobs:
           # includes a `builds/cft/` prefix that the GCS bucket does NOT
           # have — patch-playwright-cft-path.js strips that prefix at
           # module-resolution time so the URL matches the bucket layout.
+          #
+          # `npx playwright install` on Playwright 1.58.x is unusable here:
+          # its yauzl-based extraction hangs after ~7 entries and the
+          # 5-min timeout kills it, leaving a half-installed browser. The
+          # install-playwright-browsers.js script does the same job with
+          # curl + system unzip, which finishes in ~15s and produces a
+          # browser Playwright actually accepts.
           PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST: https://storage.googleapis.com/chrome-for-testing-public
         run: |
           set -euo pipefail
           echo "Installing Playwright Chromium (best-effort)..."
           # 5 min ceiling — fail fast instead of hanging the workflow.
           NODE_OPTIONS="--require=$GITHUB_WORKSPACE/.github/scripts/patch-playwright-cft-path.js" \
-            timeout 300 npx playwright install chromium || \
+            timeout 300 node "$GITHUB_WORKSPACE/.github/scripts/install-playwright-browsers.js" || \
             echo "::warning::playwright install failed; APKMirror Playwright fallback will be unavailable, but apkeep / apkmirror-api will still work"
-          if command -v sudo >/dev/null 2>&1; then
-            NODE_OPTIONS="--require=$GITHUB_WORKSPACE/.github/scripts/patch-playwright-cft-path.js" \
-              timeout 180 npx playwright install --with-deps chromium || \
-              echo "::warning::playwright install-deps failed or timed out; relying on launcher fallbacks"
-          else
-            echo "sudo not available; skipping system-deps install"
-          fi
 
       - name: Smoke-test Playwright Chromium
         if: steps.version-check.outputs.should-build == 'true'
@@ -637,11 +637,11 @@ jobs:
           # Install if not present at all. 5 min ceiling, best-effort.
           if ! find "$HOME/.cache/ms-playwright" -name 'chrome' 2>/dev/null | grep -q . \
              && ! find "$HOME/.cache/ms-playwright" -name 'chrome-headless-shell' 2>/dev/null | grep -q .; then
-            # Same GCS mirror + path-patch as check-versions. The patch
-            # is a real file so the heredoc-with-indented-terminator bug
-            # that broke the previous version of this step can't recur.
+            # Same custom installer as check-versions. The patch is a
+            # real file so the heredoc-with-indented-terminator bug
+            # that broke earlier versions of this step can't recur.
             NODE_OPTIONS="--require=$GITHUB_WORKSPACE/.github/scripts/patch-playwright-cft-path.js" \
-              timeout 300 npx playwright install chromium || \
+              timeout 300 node "$GITHUB_WORKSPACE/.github/scripts/install-playwright-browsers.js" || \
               echo "::warning::playwright fallback install failed; APKMirror scraper will be unavailable"
           fi
 
