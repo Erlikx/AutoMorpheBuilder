@@ -1918,6 +1918,16 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Fast-forward to whatever origin/main is at right now. Without
+          # this, our state.json would be built on the snapshot from
+          # actions/checkout at job start, which can be stale by the time
+          # a concurrent run pushes its own state update — and the rebase
+          # at commit time would then conflict on the build_history
+          # array.
+          BRANCH_NAME="${GITHUB_REF_NAME:-main}"
+          git fetch origin "${BRANCH_NAME}" || true
+          git merge --ff-only "origin/${BRANCH_NAME}" || true
+
           REPO_VERSIONS='${{ needs.check-versions.outputs.repo-versions }}'
           BEFORE_STATE_HASH="$(
             if [ -f state.json ]; then sha256sum state.json | awk '{print $1}'; else echo "missing"; fi
