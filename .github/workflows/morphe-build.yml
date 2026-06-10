@@ -1870,7 +1870,29 @@ jobs:
             if gh release view "$TAG" >/dev/null 2>&1; then
               echo "Release $TAG exists; uploading assets."
               for apk in $apk_files; do
-                gh release upload "$TAG" "$apk" --clobber
+                # Retry on transient 404s: the release's asset-upload URL
+                # is sometimes unavailable for a few seconds after the
+                # release is created, and concurrent re-runs can also hit
+                # race conditions. Check whether the asset already exists
+                # before uploading so we don't fail on a 422 from --clobber.
+                apk_name="$(basename "$apk")"
+                if gh release view "$TAG" --json assets --jq '.assets[].name' 2>/dev/null | grep -Fxq "$apk_name"; then
+                  echo "  asset $apk_name already attached; skipping."
+                  continue
+                fi
+                uploaded=false
+                for try in 1 2 3 4 5; do
+                  if gh release upload "$TAG" "$apk" --clobber; then
+                    uploaded=true
+                    break
+                  fi
+                  echo "  upload attempt $try for $apk_name failed; retrying in 3s..."
+                  sleep 3
+                done
+                if [ "$uploaded" != "true" ]; then
+                  echo "::error::Failed to upload $apk_name to release $TAG after 5 attempts."
+                  exit 1
+                fi
               done
               gh release edit "$TAG" --title "$TITLE" --notes "$RELEASE_NOTES"
             else
