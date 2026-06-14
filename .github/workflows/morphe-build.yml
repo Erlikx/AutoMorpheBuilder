@@ -59,42 +59,7 @@ jobs:
             exit 1
           fi
 
-          resolve_release_tag() {
-            local repo="$1"
-            local branch="$2"
-            local stable_tag=""
-            local selected_tag=""
-
-            stable_tag="$(gh release view --repo "$repo" --json tagName -q .tagName || true)"
-            if [ "$branch" = "main" ]; then
-              selected_tag="$stable_tag"
-            else
-              selected_tag="$(
-                gh api "repos/${repo}/releases?per_page=100" --jq '
-                  [ .[]
-                    | select(
-                        (.draft != true)
-                        and (
-                        ((.target_commitish // "" | ascii_downcase) == "dev")
-                        or (.prerelease == true)
-                        or ((.tag_name // "" | ascii_downcase | test("(^|[-_.])(dev|beta|alpha|rc)")))
-                        )
-                      )
-                  ][0].tag_name // empty
-                ' || true
-              )"
-              if [ -z "$selected_tag" ]; then
-                echo "No dev-style release found for ${repo}; falling back to latest release tag."
-                selected_tag="$stable_tag"
-              fi
-            fi
-
-            if [ -z "$selected_tag" ]; then
-              echo "::error::Could not resolve release tag for ${repo} (branch=${branch})."
-              exit 1
-            fi
-            echo "$selected_tag"
-          }
+          source "$GITHUB_WORKSPACE/.github/scripts/resolve-tag.sh"
 
           # Resolve tag for each unique patch repo+branch pair
           declare -A REPO_TAGS
@@ -395,82 +360,65 @@ jobs:
           export ANDROID_HOME=/tmp/android-sdk
           export PATH="$ANDROID_HOME/build-tools/34.0.0:$PATH"
 
-          RESULTS_FILE="$RUNNER_TEMP/download_results.json"
-          echo "[]" > "$RESULTS_FILE"
+          RESULTS_DIR="$RUNNER_TEMP/download_results"
+          mkdir -p "$RESULTS_DIR"
 
           while IFS= read -r PKG; do
+            (
               PATCH_REPO="$(jq -r --arg pkg "$PKG" '.patch_repos[$pkg].repo // empty' config.json)"
               PATCH_SLUG="${PATCH_REPO//\//-}"
               MPP_FILE="tools/${PATCH_SLUG}.mpp"
-
               if [ -z "$PATCH_REPO" ] || [ ! -f "$MPP_FILE" ]; then
-                echo "No .mpp available for $PKG (repo=${PATCH_REPO:-unset}); skipping version resolution."
-                continue
+                echo "No .mpp available for $PKG; skipping."
+                exit 0
               fi
-
-              # Check if this app has a pinned version
               PINNED_VERSION="$(jq -r --arg pkg "$PKG" '.patch_repos[$pkg].pin_version // empty' config.json)"
               if [ -n "$PINNED_VERSION" ] && [ "$PINNED_VERSION" != "null" ]; then
                 echo "Using pinned version for $PKG: $PINNED_VERSION"
                 VERSION_TO_DOWNLOAD="$PINNED_VERSION"
               else
-                # Normal flow: get latest supported version from morphe-cli.
-                # Pass --patches so the CLI uses the downloaded .mpp and
-                # --filter-package-names so the output is filtered to this app.
                 cp "$MPP_FILE" tools/patches.mpp
-                echo "Getting supported version for $PKG..."
                 VERSIONS_OUTPUT=$(java -jar tools/morphe-cli.jar list-versions -f "$PKG" --patches=tools/patches.mpp 2>/dev/null || echo "")
-                echo "::debug::morphe-cli output for $PKG: $VERSIONS_OUTPUT"
                 VERSION_TO_DOWNLOAD=$(echo "$VERSIONS_OUTPUT" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)
               fi
-
               if [ -z "$VERSION_TO_DOWNLOAD" ]; then
                 echo "Could not determine version for $PKG, skipping..."
-                continue
+                exit 0
               fi
-
-              echo "Downloading $PKG version $VERSION_TO_DOWNLOAD..."
-
               APK_DIR="tools/apks"
               mkdir -p "$APK_DIR"
-
               RESULT=$(node .github/scripts/unified-downloader.js "$PKG" "$VERSION_TO_DOWNLOAD" "$APK_DIR" 2>&1) || true
-              echo "::debug::unified-downloader result for $PKG: $RESULT"
-
               if echo "$RESULT" | jq -e '.success' >/dev/null 2>&1; then
-                FILEPATH=$(echo "$RESULT" | jq -r '.filepath')
-                SOURCE=$(echo "$RESULT" | jq -r '.source')
                 URL=$(echo "$RESULT" | jq -r '.url // empty')
-                echo "Downloaded $PKG via $SOURCE: $FILEPATH"
                 if [ -n "$URL" ] && [ "$URL" != "null" ]; then
-                  echo "RESULT:$PKG:$VERSION_TO_DOWNLOAD:$URL" >> "$RESULTS_FILE.tmp"
+                  echo "$PKG:$VERSION_TO_DOWNLOAD:$URL" > "$RESULTS_DIR/${PKG}.txt"
                 fi
               else
-                echo "Failed to download $PKG (version $VERSION_TO_DOWNLOAD): $RESULT"
-                # If pinned version failed, fall back to auto-resolution
+                echo "Failed to download $PKG: $RESULT" > "$RESULTS_DIR/${PKG}.failed"
                 if [ -n "$PINNED_VERSION" ] && [ "$PINNED_VERSION" != "null" ]; then
-                  echo "Pinned version download failed; falling back to auto-resolution for $PKG..."
                   cp "$MPP_FILE" tools/patches.mpp
-                  VERSIONS_OUTPUT=$(java -jar tools/morphe-cli.jar list-versions -f "$PKG" --patches=tools/patches.mpp 2>/dev/null || echo "")
-                  FALLBACK_VERSION=$(echo "$VERSIONS_OUTPUT" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)
+                  FALLBACK_VERSIONS=$(java -jar tools/morphe-cli.jar list-versions -f "$PKG" --patches=tools/patches.mpp 2>/dev/null || echo "")
+                  FALLBACK_VERSION=$(echo "$FALLBACK_VERSIONS" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)
                   if [ -n "$FALLBACK_VERSION" ]; then
-                    echo "Retrying download with auto-resolved version: $FALLBACK_VERSION"
                     FALLBACK_RESULT=$(node .github/scripts/unified-downloader.js "$PKG" "$FALLBACK_VERSION" "$APK_DIR" 2>&1) || true
                     if echo "$FALLBACK_RESULT" | jq -e '.success' >/dev/null 2>&1; then
-                      echo "Downloaded $PKG via fallback: $(echo "$FALLBACK_RESULT" | jq -r '.filepath')"
                       FALLBACK_URL=$(echo "$FALLBACK_RESULT" | jq -r '.url // empty')
                       if [ -n "$FALLBACK_URL" ] && [ "$FALLBACK_URL" != "null" ]; then
-                        echo "RESULT:$PKG:$FALLBACK_VERSION:$FALLBACK_URL" >> "$RESULTS_FILE.tmp"
+                        echo "$PKG:$FALLBACK_VERSION:$FALLBACK_URL" > "$RESULTS_DIR/${PKG}.txt"
                       fi
                     fi
                   fi
                 fi
               fi
+            ) &
           done < <(jq -r '.patch_repos | keys[]' config.json)
+          wait
 
-          # Now process sequentially
-          if [ -f "$RESULTS_FILE.tmp" ]; then
+          # Merge per-package results and process URLs
+          cat "$RESULTS_DIR"/*.txt 2>/dev/null > "$RESULTS_FILE.tmp" || true
+          if [ -f "$RESULTS_FILE.tmp" ] && [ -s "$RESULTS_FILE.tmp" ]; then
             while IFS=: read -r pkg ver url; do
+              [ -z "$pkg" ] && continue
               node .github/scripts/update-download-urls.js "$pkg" "$ver" "$url" || true
             done < "$RESULTS_FILE.tmp"
           fi
@@ -540,7 +488,15 @@ jobs:
 
           echo "All dependencies verified"
 
+      - name: Cache BouncyCastle
+        id: cache-bc
+        uses: actions/cache@v5
+        with:
+          path: /usr/share/java/bcprov.jar
+          key: bouncycastle-bcprov-1.77
+
       - name: Install BouncyCastle for signing
+        if: steps.cache-bc.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
           echo "Installing BouncyCastle for APK signing..."
@@ -1104,28 +1060,6 @@ jobs:
                 ' | sort -nr | cut -d' ' -f2-
           }
 
-          download_with_playwright() {
-            local url="$1"
-
-            if [ -z "$url" ]; then
-              echo "::error::Playwright download URL is empty."
-              return 1
-            fi
-
-            echo "Downloading APK using Playwright..."
-
-            local apk_name="${url##*/}"
-            apk_name="${apk_name%/}"
-            [ -z "$apk_name" ] && apk_name="${APP_ID}.apk"
-
-            case "${apk_name,,}" in
-              *.apk|*.xapk|*.apkm|*.apks) ;;
-              *) apk_name="${apk_name}.apk" ;;
-            esac
-
-            download_with_curl "$url"
-          }
-
           download_with_curl() {
             local url="$1"
             local attempt=1
@@ -1221,9 +1155,7 @@ jobs:
 
                 if [ -n "$MANUAL_URL" ]; then
                   echo "Trying manual URL fallback..."
-                  if download_with_playwright "$MANUAL_URL"; then
-                    DOWNLOAD_SUCCESS=true
-                  elif download_with_curl "$MANUAL_URL"; then
+                  if download_with_curl "$MANUAL_URL"; then
                     DOWNLOAD_SUCCESS=true
                   fi
                 fi
@@ -1904,30 +1836,6 @@ jobs:
             echo "::notice::Published release: ${TAG}"
           done
 
-  update-download-urls:
-    needs: create-release
-    if: success()
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Commit updated config.json
-        run: |
-          # Note: this job runs on a fresh checkout; config.json changes from
-          # other runners are not automatically present here. The git status check
-          # will typically find nothing to commit. This is a known pre-existing
-          # limitation — URL commits happen via update-state job's git add instead.
-          if [ -n "$(git status --porcelain)" ]; then
-            git config --local user.email "github-actions[bot]@users.noreply.github.com"
-            git config --local user.name "github-actions[bot]"
-            git add config.json
-            git commit -m "chore: update download URLs after successful build" || true
-            git push || true
-          else
-            echo "No changes to config.json on this runner"
-          fi
-
   update-state:
     needs: [check-versions, build, create-release]
     if: needs.build.result == 'success' && needs.check-versions.outputs.should-build == 'true'
@@ -2111,7 +2019,7 @@ jobs:
                       "run_number": $run_number,
                       "commit": $sha
                   }])
-                 | if length > 100 then .[-100:] else . end
+                 | if length > 30 then .[-30:] else . end
                ) as $history
              | {
                  "patches": $patches_map,

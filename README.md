@@ -63,32 +63,29 @@ Signed builds are enforced.
 {
   "preferred_arch": "arm64-v8a",
   "auto_update_urls": true,
-  "apkmirror_paths": {
-    "com.google.android.youtube": "google-inc/youtube",
-    "com.google.android.apps.youtube.music": "google-inc/youtube-music",
-    "com.reddit.frontpage": "redditinc/reddit"
-  },
   "patch_repos": {
     "com.google.android.youtube": {
       "name": "youtube",
       "repo": "MorpheApp/morphe-patches",
-      "branch": "dev",
-      "pin_version": "20.45.36"
+      "branch": "main",
+      "apkmirror_path": "google-inc/youtube"
     },
     "com.google.android.apps.youtube.music": {
       "name": "ytmusic",
       "repo": "MorpheApp/morphe-patches",
-      "branch": "dev"
+      "branch": "main",
+      "apkmirror_path": "google-inc/youtube-music"
     },
     "com.reddit.frontpage": {
       "name": "reddit",
       "repo": "MorpheApp/morphe-patches",
-      "branch": "dev"
+      "branch": "main",
+      "apkmirror_path": "redditinc/reddit"
     }
   },
   "cli": {
     "repo": "MorpheApp/morphe-cli",
-    "branch": "dev"
+    "branch": "main"
   },
   "download_urls": {
     "com.google.android.youtube": {
@@ -102,8 +99,7 @@ Signed builds are enforced.
 |---------|---------|-------------|
 | `preferred_arch` | `arm64-v8a` | CPU architecture to prefer (`arm64-v8a`, `armeabi-v7a`, etc.) |
 | `auto_update_urls` | `true` | Auto-update download URLs after successful builds |
-| `apkmirror_paths` | see above | Maps package IDs to APKMirror app paths |
-| `patch_repos` | — | Per-app patch repo, branch, display name, and optional `pin_version` to lock a specific APK version |
+| `patch_repos` | — | Per-app config: `name`, `repo`, `branch`, `apkmirror_path` (APKMirror URL slug), and optional `pin_version` to lock a specific APK version |
 | `cli` | — | morphe-cli repo and branch (`main` or `dev`) |
 | `download_urls` | — | Version-specific direct download URLs (auto-updated after each successful build) |
 

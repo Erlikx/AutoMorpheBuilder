@@ -47,32 +47,29 @@ Edit `config.json` to set build options:
 {
   "preferred_arch": "arm64-v8a",
   "auto_update_urls": true,
-  "apkmirror_paths": {
-    "com.google.android.youtube": "google-inc/youtube",
-    "com.google.android.apps.youtube.music": "google-inc/youtube-music",
-    "com.reddit.frontpage": "redditinc/reddit"
-  },
   "patch_repos": {
     "com.google.android.youtube": {
       "name": "youtube",
       "repo": "MorpheApp/morphe-patches",
-      "branch": "dev",
-      "pin_version": "20.45.36"
+      "branch": "main",
+      "apkmirror_path": "google-inc/youtube"
     },
     "com.google.android.apps.youtube.music": {
       "name": "ytmusic",
       "repo": "MorpheApp/morphe-patches",
-      "branch": "dev"
+      "branch": "main",
+      "apkmirror_path": "google-inc/youtube-music"
     },
     "com.reddit.frontpage": {
       "name": "reddit",
       "repo": "MorpheApp/morphe-patches",
-      "branch": "dev"
+      "branch": "main",
+      "apkmirror_path": "redditinc/reddit"
     }
   },
   "cli": {
     "repo": "MorpheApp/morphe-cli",
-    "branch": "dev"
+    "branch": "main"
   }
 }
 ```
@@ -81,8 +78,7 @@ Edit `config.json` to set build options:
 |-------|---------|-------------|
 | `preferred_arch` | `arm64-v8a` | CPU architecture to prefer when selecting APK variant |
 | `auto_update_urls` | `true` | Auto-update download URLs after each successful build |
-| `apkmirror_paths` | see above | Maps package IDs to APKMirror URL slugs — required for auto-resolution |
-| `patch_repos` | — | Per-app patch repo, branch, display name, and optional `pin_version` to lock a specific APK version |
+| `patch_repos` | — | Per-app config: `name`, `repo`, `branch`, `apkmirror_path` (APKMirror URL slug), and optional `pin_version` to lock a specific APK version |
 | `cli` | — | morphe-cli repo and branch (`main` or `dev`) |
 
 The `download_urls` field is managed automatically by the workflow after each successful build. You don't need to set it manually.
@@ -171,7 +167,7 @@ The APKMirror scraper navigates release page → variant page → download page 
 
 The download chain exhausted all sources. Check:
 
-- The `apkmirror_paths` values in `config.json` are correct for each app
+- The `apkmirror_path` values in `config.json` `patch_repos` are correct for each app
 - Run the workflow again (transient Cloudflare blocks are common)
 
 ### `Chosen APK has no classes.dex`

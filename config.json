@@ -1,26 +1,24 @@
 {
   "preferred_arch": "arm64-v8a",
   "auto_update_urls": true,
-  "apkmirror_paths": {
-    "com.google.android.youtube": "google-inc/youtube",
-    "com.google.android.apps.youtube.music": "google-inc/youtube-music",
-    "com.reddit.frontpage": "redditinc/reddit"
-  },
   "patch_repos": {
     "com.google.android.youtube": {
       "name": "youtube",
       "repo": "MorpheApp/morphe-patches",
-      "branch": "main"
+      "branch": "main",
+      "apkmirror_path": "google-inc/youtube"
     },
     "com.google.android.apps.youtube.music": {
       "name": "ytmusic",
       "repo": "MorpheApp/morphe-patches",
-      "branch": "main"
+      "branch": "main",
+      "apkmirror_path": "google-inc/youtube-music"
     },
     "com.reddit.frontpage": {
       "name": "reddit",
       "repo": "MorpheApp/morphe-patches",
-      "branch": "main"
+      "branch": "main",
+      "apkmirror_path": "redditinc/reddit"
     }
   },
   "cli": {

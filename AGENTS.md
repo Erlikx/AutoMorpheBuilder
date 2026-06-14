@@ -1,106 +1,125 @@
 # AGENTS.md - AutoMorpheBuilder
 
-## Project Overview
+## What this repo is
 
-GitHub Actions CI/CD project for building patched Android APKs with Morphe patches. Not a traditional app — the workflow *is* the product.
+GitHub Actions CI/CD project that builds patched Android APKs with [Morphe](https://github.com/MorpheApp/morphe-patches) patches. **The workflow is the product** — there is no app to run locally. The full system is two YAML files plus a handful of Node.js scripts under `.github/scripts/`.
 
-## Key Files
+Supported apps (defined in `config.json` `patch_repos`): `com.google.android.youtube`, `com.google.android.apps.youtube.music`, `com.reddit.frontpage`. Add a new app = add a single entry to `config.json` `patch_repos` (includes `apkmirror_path`), no workflow edits.
+
+## Key files
 
 | File | Purpose |
 |------|---------|
-| `config.json` | Build config: `patch_repos` (per-app, optional `pin_version`), `cli` repo/branch, APKMirror paths, cached download URLs |
-| `patches.json` | Patch toggles — repo-keyed: `{ "owner/repo": { "pkg": { "Patch": true } } }` |
-| `state.json` | Tracks live Morphe versions and build history |
-| `.github/workflows/morphe-build.yml` | Main workflow (1877 lines — contains all build logic) |
-| `.github/workflows/update-patches.yml` | Manual workflow to sync `patches.json` from upstream |
-| `.github/scripts/unified-downloader.js` | APK downloader with multi-source fallback + Playwright |
-| `.github/scripts/update-download-urls.js` | Writes resolved URLs back to `config.json` |
-| `.github/scripts/__tests__/apkmirror-scraper.test.js` | Jest unit tests |
+| `config.json` | Build config: `patch_repos` (per-app, with `name`, `repo`, `branch`, `apkmirror_path`, optional `pin_version`), `cli` repo/branch, `download_urls` cache. |
+| `patches.json` | Patch toggles — **repo-keyed**: `{ "owner/repo": { "pkg": { "Patch": true } } }` |
+| `state.json` | Live Morphe versions + per-run build history. Updated by the `update-state` job. |
+| `.github/workflows/morphe-build.yml` | Main workflow (2224 lines, contains all build logic). Runs daily at 05:15 UTC + manual `workflow_dispatch`. |
+| `.github/workflows/update-patches.yml` | Manual-only workflow to refresh `patches.json` from upstream patch repos. |
+| `.github/scripts/unified-downloader.js` | APK downloader with multi-source fallback (config cache → URL cache → parallel apkeep/APKMirror-API/Playwright resolution → sequential fallback). |
+| `.github/scripts/update-download-urls.js` | Writes resolved URLs back to `config.json` `download_urls`. CLI: `node update-download-urls.js <pkg> <version> <url>`. |
+| `.github/scripts/install-aapt.js` | Installs Android `aapt` (cmdline-tools + build-tools 34.0.0). Idempotent. |
+| `.github/scripts/install-playwright-browsers.js` | Custom Playwright installer (bypasses a yauzl/Node bug in Playwright 1.58). |
+| `.github/scripts/cleanup-caches.js` | Prunes stale GitHub Actions caches. Dry-run by default; `--apply` to delete. |
+| `.github/scripts/resolve-tag.sh` | Shared shell script: `resolve_release_tag` function (sourced by both workflows). |
+| `.github/scripts/__tests__/apkmirror-scraper.test.js` | Jest unit tests for URL/variant helpers in `unified-downloader.js`. |
 
-## Workflow Jobs
+## Workflow job graph (morphe-build.yml)
 
 ```
-check-versions → build (matrix per app) → create-release → update-download-urls + update-state
+check-versions → build (matrix per app) → create-release
+                                       ↘ update-state
 ```
 
-- `check-versions`: Queries GitHub for latest Morphe patch/CLI tags, decides whether build is needed
-- `build`: Per-app parallel matrix jobs — download APK, patch, sign, output artifact
-- `create-release`: Creates GitHub Release `vYYYY.MM.DD`
-- `update-download-urls`: Persists resolved download URLs to `config.json`
-- `update-state`: Updates `state.json` with new versions and build history
+- `check-versions` — queries GitHub for latest Morphe patch/CLI tags, decides whether to build, pre-downloads APKs (now in parallel across apps). Sets `should-build` output. Hard-fails if `patch_repos` is empty or `cli.repo`/`cli.branch` is missing.
+- `build` — per-app parallel matrix. Downloads APK, patches with morphe-cli, signs (signing is **enforced** — no unsigned output). Uses `pin_version` from `config.json` if set, otherwise picks the latest Morphe-supported version.
+- `create-release` — one GitHub Release per app, tag `vYYYY.MM.DD`, contains only that app's APK.
+- `update-state` — rebase-pushes a fresh `state.json` + `patches.json` + `config.json` to `main` (handles concurrent-run conflicts). Also prunes stale GitHub Actions caches.
 
-## Config Structure (CRITICAL)
-
-### config.json uses `patch_repos` + `cli` (NOT `branches`)
-
-```json
-{
-  "patch_repos": {
-    "com.google.android.youtube": { "name": "youtube", "repo": "MorpheApp/morphe-patches", "branch": "dev", "pin_version": "20.45.36" }
-  },
-  "cli": { "repo": "MorpheApp/morphe-cli", "branch": "dev" }
-}
-```
-
-### patches.json is repo-keyed
-
-```json
-{
-  "MorpheApp/morphe-patches": {
-    "com.google.android.youtube": { "Hide ads": true }
-  }
-}
-```
-
-## Artifact Naming
-
-Format: `<app>-v<base-version>-<patches-version>.apk`
-
-Example: `youtube-v20.44.38-v1.24.0-dev.8.apk`
-
-## Obtainium Regex
-
-Use: `^youtube-v.*\.apk$` / `^ytmusic-v.*\.apk$` / `^reddit-v.*\.apk$`
-
-The `-v` infix is required to distinguish from other APK files.
-
-## Developer Commands
+## Developer commands
 
 ```bash
-# Run tests
-npm test                    # all tests
-npx jest file              # single test file
-
-# Validate workflow
-docker run --rm -v $(pwd):/repo ghcr.io/rhysd/actionlint:latest -color .
+# Run JS unit tests (Jest)
+npm test
+npx jest .github/scripts/__tests__/apkmirror-scraper.test.js   # single file
 
 # Validate JSON
 jq '.' patches.json && jq '.' config.json && jq '.' state.json
 
 # Lint JS
 npx eslint .github/scripts/*.js
+
+# Lint shell
+shellcheck .github/scripts/*.sh
+
+# Validate workflow (any of these work)
+docker run --rm -v $(pwd):/repo ghcr.io/rhysd/actionlint:latest -color .
+actionlint .github/workflows/morphe-build.yml
+python3 -c "import yaml; yaml.safe_load(open('.github/workflows/morphe-build.yml'))" && echo "YAML is valid"
+
+# Run the cache cleanup locally (dry-run, needs GH_TOKEN)
+GITHUB_REPOSITORY=owner/repo GH_TOKEN=... node .github/scripts/cleanup-caches.js
+GITHUB_REPOSITORY=owner/repo GH_TOKEN=... node .github/scripts/cleanup-caches.js --apply
 ```
 
-## Adding a New App
+## Config structure (CRITICAL — do not rename keys)
 
-1. Add to `config.json` `patch_repos` and `apkmirror_paths`
-2. Run `update-patches.yml` workflow (manual trigger) to populate `patches.json`
-3. Edit `patches.json` to toggle patches
-4. Push — next scheduled run builds it automatically
+`config.json` uses `patch_repos` and `cli` (NOT `branches`). The top-level shape is:
 
-No workflow edits needed — the matrix is derived from `config.json`.
+```json
+{
+  "preferred_arch": "arm64-v8a",
+  "auto_update_urls": true,
+  "patch_repos":      { "com.google.android.youtube": { "name": "youtube", "repo": "MorpheApp/morphe-patches", "branch": "main", "apkmirror_path": "google-inc/youtube", "pin_version": "20.45.36" } },
+  "cli":              { "repo": "MorpheApp/morphe-cli", "branch": "main" },
+  "download_urls":    { "com.google.android.youtube": { "8.44.54": "...", "latest_supported": "..." } }
+}
+```
 
-## Common Failures
+- `pin_version` (optional, per app) locks the build to a specific APK version, bypassing Morphe-supported resolution. When set, `update-download-urls.js` skips URL updates for that app.
+- `apkmirror_path` (required, per app in `patch_repos`) is the APKMirror URL slug for that package (e.g. `google-inc/youtube`).
+- `download_urls` is auto-managed — do not hand-edit.
 
-- **`Chosen APK has no classes.dex`**: Downloaded a split/config APK, not the base. Usually means APKMirror only has a BUNDLE variant for that version.
-- **`Wrong version of key store`**: Keystore password wrong, or key password differs from keystore password.
-- **APK download fails**: Run workflow again — transient Cloudflare blocks are common.
-- **Build skipped despite new version**: Check that `state.json` was updated by `update-state` job. If the runner's git push failed silently, state can drift.
-- **`Could not resolve a Morphe-supported version`**: The `patches-list.json` format changed to `compatiblePackages` as an array of objects (with `packageName` + `targets` fields). If jq uses the old key-indexed syntax `.compatiblePackages[$pkg]`, it returns null. Use `select(.packageName == $pkg)` instead. The `targetver` step and `update-state`/`update-patches.yml` both handle both formats now.
+`patches.json` is **repo-keyed** (top-level key = `owner/repo`, e.g. `MorpheApp/morphe-patches`). The old flat `{pkg: {patch: true}}` format is detected and reset to all-true on first run of `update-patches.yml`. Toggles you set are preserved across syncs; new upstream patches default to `true`.
 
-## Repo Quirks
+## Adding a new app
 
-- Workflow runs `npm ci` then `npx playwright install chromium` on every run (not cached at npm level)
-- BouncyCastle is downloaded fresh from Maven Central each build (no lockfile)
-- Keystore conversion: source keystore → BKS for morphe-cli compatibility
-- APKMirror scraper uses Playwright when curl is blocked; all 3 pages navigated in same browser session to preserve cookies
+1. Add the package to `config.json` `patch_repos` with `name`, `repo`, `branch`, and `apkmirror_path` (URL slug).
+2. Trigger `.github/workflows/update-patches.yml` manually to populate `patches.json` from the upstream repo.
+3. Edit `patches.json` to enable/disable specific patches.
+4. Push — next scheduled or manual build picks it up via the dynamic matrix.
+
+No `morphe-build.yml` edits needed; the matrix is derived from `config.json`.
+
+## Artifact / release naming
+
+- Artifact: `<app>-v<base-version>-<patches-version>.apk` (e.g. `youtube-v20.44.38-v1.24.0-dev.8.apk`).
+- Release tag per app: `<app>-v<base-version>-<patches-version>`.
+- The `-v` infix in the APK filename is required — Obtainium filters use `^youtube-v.*\.apk$` (release tag `^youtube`, APK filter `^youtube-v.*\.apk$`). One Obtainium entry per app, same repo.
+
+## Signing (enforced)
+
+- Decode `KEYSTORE_BASE64` → `tools/source.keystore`. Required secrets: `KEYSTORE_BASE64`, `KEYSTORE_PASSWORD`. Optional: `KEY_ALIAS` (defaults to first), `KEY_PASSWORD` (only if differs from keystore password).
+- Workflow detects type (PKCS12 / JKS / BKS / UBER) and converts to BKS for morphe-cli.
+- Build fails immediately if signing cannot complete — there is no "unsigned" output path.
+
+## Repo quirks (not obvious from filenames)
+
+- `state.json` and `patches.json` get pushed back to `main` by the workflow itself (`update-state` and `update-patches` jobs). Local edits to either will conflict on the next run. Make `patches.json` changes before the run, or trigger `update-patches.yml` first.
+- `download_urls` cached at `~/.cache/auto-morphe-builder/urls/` is consulted **before** `config.json` `download_urls` — clear it if you want to force re-resolution.
+- BouncyCastle is cached via `actions/cache@v5` (bcprov-jdk18on 1.77) and only downloaded when the cache misses.
+- APKMirror scraper uses Playwright when curl is blocked by Cloudflare; all 3 pages (release → variant → download) navigate in the same browser session to preserve cookies. The custom `install-playwright-browsers.js` is required — `npx playwright install` is broken on Playwright 1.58 (yauzl extraction hang).
+- `npm ci` + `npx playwright install chromium` runs on every CI build (not cached at the npm level).
+- The `update-state` job rebases before regenerating `state.json` to handle concurrent-run conflicts; if `state.json` ever drifts, check whether the runner's `git push` failed silently (the workflow only emits a `::warning::`, not a failure).
+
+## Common failures
+
+- **`Chosen APK has no classes.dex`** — the scraper picked a split/config APK. The target version likely only has a BUNDLE variant on APKMirror. Check APKMirror manually; pin to an earlier version with `pin_version` if needed.
+- **`Wrong version of key store`** — keystore password wrong, or key password differs from keystore password (set `KEY_PASSWORD`).
+- **`Could not resolve a Morphe-supported version`** — `patches-list.json` format changed. Old key-indexed syntax: `.compatiblePackages[$pkg]`. New array-of-objects syntax requires `select(.packageName == $pkg)`. `targetver` step and both workflows now handle both forms.
+- **APK download fails / `No APK could be downloaded`** — Cloudflare rate-limit on APKMirror. Re-run; transient. Verify `apkmirror_path` slugs in `config.json` `patch_repos` are still valid.
+- **Build skipped despite new version** — `state.json` not updated. Inspect the `update-state` job log; silent `git push` failures are the usual cause.
+- **Obtainium not finding updates** — confirm both filters are set (Release Tag Filter + APK Filter) and the APK filter includes the `-v` infix.
+
+## Local environment
+
+No Node version pinned in `package.json`; whatever the GitHub Actions runner uses works. Tests use Jest only — no ESLint/Prettier config files exist; lint commands above are conventional. No OpenCode config (`opencode.json`) is present in the repo.

@@ -114,9 +114,9 @@ Intended usage: Run `update-patches` → review/edit `patches.json` → run full
     "com.google.android.youtube": "google-inc/youtube"
   },
   "patch_repos": {
-    "com.google.android.youtube": { "name": "youtube", "repo": "MorpheApp/morphe-patches", "branch": "dev", "pin_version": "20.45.36" }
+    "com.google.android.youtube": { "name": "youtube", "repo": "MorpheApp/morphe-patches", "branch": "main" }
   },
-  "cli": { "repo": "MorpheApp/morphe-cli", "branch": "dev" },
+  "cli": { "repo": "MorpheApp/morphe-cli", "branch": "main" },
   "download_urls": {
     "com.google.android.youtube": {
       "latest_supported": "https://www.apkmirror.com/apk/..."
