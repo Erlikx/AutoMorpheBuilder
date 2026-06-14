@@ -415,12 +415,12 @@ jobs:
           wait
 
           # Merge per-package results and process URLs
-          cat "$RESULTS_DIR"/*.txt 2>/dev/null > "$RESULTS_FILE.tmp" || true
-          if [ -f "$RESULTS_FILE.tmp" ] && [ -s "$RESULTS_FILE.tmp" ]; then
+          cat "$RESULTS_DIR"/*.txt 2>/dev/null > "$RESULTS_DIR/merged.txt" || true
+          if [ -f "$RESULTS_DIR/merged.txt" ] && [ -s "$RESULTS_DIR/merged.txt" ]; then
             while IFS=: read -r pkg ver url; do
               [ -z "$pkg" ] && continue
               node .github/scripts/update-download-urls.js "$pkg" "$ver" "$url" || true
-            done < "$RESULTS_FILE.tmp"
+            done < "$RESULTS_DIR/merged.txt"
           fi
 
       - name: Upload downloaded APKs
