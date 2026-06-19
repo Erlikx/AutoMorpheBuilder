@@ -39,3 +39,8 @@ out/
 node_modules/
 dist/
 build/
+
+# AI
+
+docs/
+CLAUDE.md
