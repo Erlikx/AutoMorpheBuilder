@@ -1715,6 +1715,107 @@ jobs:
           mv "$OUT_APK" "$OUT_DIR/$OUTPUT_NAME"
           echo "output=$OUTPUT_NAME" >> "$GITHUB_OUTPUT"
 
+      - name: Patch APK version for Obtainium
+        if: success()
+        env:
+          KEYSTORE_FILE: ${{ steps.keystore.outputs.path }}
+          KEY_ALIAS: ${{ steps.keystore.outputs.alias }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          APK="$OUT_DIR/${{ steps.patch.outputs.output }}"
+          APK_VERSION="${{ steps.getapk.outputs.version }}"
+          PATCH_TAG="${{ matrix.patchTag }}"
+
+          if [ ! -f "$APK" ]; then
+            echo "::error::APK not found at $APK"
+            exit 1
+          fi
+
+          NEW_VERSION_NAME="${APK_VERSION}+${PATCH_TAG}"
+          echo "Patching APK version for Obtainium compatibility..."
+          echo "  APK: $APK"
+          echo "  versionName: $APK_VERSION → $NEW_VERSION_NAME"
+
+          # Download apktool if not already present (idempotent)
+          APKTOOL_JAR="/tmp/apktool.jar"
+          if [ ! -f "$APKTOOL_JAR" ]; then
+            echo "Downloading apktool..."
+            curl -fsSL "https://github.com/iBotPeaches/Apktool/releases/download/v2.10.0/apktool_2.10.0.jar" -o "$APKTOOL_JAR"
+          fi
+
+          WORK_DIR="/tmp/apk_work_$$"
+          MODIFIED_APK="/tmp/modified_$$.apk"
+          ALIGNED_APK="/tmp/aligned_$$.apk"
+
+          # Decompile APK
+          echo "Decompiling APK with apktool..."
+          java -jar "$APKTOOL_JAR" d -f "$APK" -o "$WORK_DIR"
+
+          MANIFEST="$WORK_DIR/AndroidManifest.xml"
+          if [ ! -f "$MANIFEST" ]; then
+            echo "::error::AndroidManifest.xml not found after decompile"
+            exit 1
+          fi
+
+          # Read current versionCode
+          CURRENT_VC=$(grep -oP 'versionCode="\K[0-9]+' "$MANIFEST" | head -1)
+          if [ -z "$CURRENT_VC" ]; then
+            echo "::error::Could not read versionCode from manifest"
+            exit 1
+          fi
+
+          # Compute a deterministic versionCode bump from patch tag
+          # Strip leading 'v', keep only digits, then mod+1 for a stable increment
+          INCREMENT=$(echo "$PATCH_TAG" | sed -E 's/^v//; s/[^0-9]+//g')
+          INCREMENT=$((INCREMENT % 10000 + 1))
+          NEW_VC=$((CURRENT_VC + INCREMENT))
+          echo "  versionCode: $CURRENT_VC → $NEW_VC"
+
+          # Patch manifest
+          sed -i 's/versionName="[^"]*"/versionName="'"$NEW_VERSION_NAME"'"/' "$MANIFEST"
+          sed -i 's/versionCode="[0-9]*"/versionCode="'"$NEW_VC"'"/' "$MANIFEST"
+
+          # Verify patches applied
+          echo "  Patched manifest:"
+          grep -o 'versionName="[^"]*"' "$MANIFEST"
+          grep -o 'versionCode="[0-9]*"' "$MANIFEST"
+
+          # Rebuild APK
+          echo "Rebuilding APK..."
+          java -jar "$APKTOOL_JAR" b "$WORK_DIR" -o "$MODIFIED_APK"
+
+          if [ ! -f "$MODIFIED_APK" ]; then
+            echo "::error::apktool rebuild failed"
+            exit 1
+          fi
+
+          # Zipalign
+          echo "Zipaligning..."
+          zipalign -f 4 "$MODIFIED_APK" "$ALIGNED_APK"
+
+          # Re-sign with apksigner (BKS keystore needs BouncyCastle provider)
+          echo "Re-signing APK..."
+          KEY_PASS_IN="${KEY_PASSWORD:-$KEYSTORE_PASSWORD}"
+          apksigner sign \
+            --ks "$KEYSTORE_FILE" \
+            --ks-key-alias "$KEY_ALIAS" \
+            --ks-pass "pass:$KEYSTORE_PASSWORD" \
+            --key-pass "pass:$KEY_PASS_IN" \
+            --provider "org.bouncycastle.jce.provider.BouncyCastleProvider" \
+            --provider-classpath /usr/share/java/bcprov.jar \
+            "$ALIGNED_APK"
+
+          # Replace original APK
+          mv "$ALIGNED_APK" "$APK"
+
+          # Clean up temp files
+          rm -rf "$WORK_DIR" "$MODIFIED_APK"
+
+          echo "✓ APK version patched and re-signed successfully"
+
       - name: Upload patched ${{ matrix.name }}
         uses: actions/upload-artifact@v7
         with:
@@ -1840,6 +1941,14 @@ jobs:
     needs: [check-versions, build, create-release]
     if: needs.build.result == 'success' && needs.check-versions.outputs.should-build == 'true'
     runs-on: ubuntu-latest
+    # `actions: write` is required for `gh cache delete` in the
+    # "Prune stale GitHub Actions caches" step below; `actions: read`
+    # (the workflow default) is insufficient and causes every delete
+    # to fail with HTTP 403. Scoped to this job only — other jobs keep
+    # `actions: read` per least-privilege.
+    permissions:
+      contents: write
+      actions: write
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -1866,120 +1975,15 @@ jobs:
             if [ -f patches.json ]; then sha256sum patches.json | awk '{print $1}'; else echo "missing"; fi
           )"
 
-          # Sync patches.json to repo-keyed structure (same logic as update-patches.yml)
-          COMPAT_FN='
-            def compat_pkg_names($patch):
-              if ($patch.compatiblePackages? | type) == "object" then
-                ($patch.compatiblePackages | keys)
-              elif ($patch.compatible_packages? | type) == "object" then
-                ($patch.compatible_packages | keys)
-              elif ($patch.compatiblePackages? | type) == "array" then
-                ($patch.compatiblePackages | map(.name // .packageName // empty))
-              elif ($patch.compatible_packages? | type) == "array" then
-                ($patch.compatible_packages | map(.name // .packageName // empty))
-              else
-                []
-              end;
-          '
-
-          REPO_PAIRS="$(jq -r '
-            .patch_repos
-            | to_entries
-            | map(.value | "\(.repo)|\(.branch | ascii_downcase)")
-            | unique[]
-          ' config.json)"
-
-          # Guard: nothing to sync if no repos configured
-          if [ -z "$REPO_PAIRS" ]; then
-            echo "::warning::No repos in patch_repos; skipping patches.json sync."
-          else
-
-          # Fetch patches-list.json for each unique repo
-          mkdir -p "$RUNNER_TEMP/patches-lists"
-          while IFS='|' read -r repo branch; do
-            slug="${repo//\//-}"
-            tag="$(echo "$REPO_VERSIONS" | jq -r --arg r "$repo" '.[$r] // empty')"
-            if [ -z "$tag" ]; then
-              echo "No resolved tag for ${repo}; skipping patches sync for this repo."
-              continue
-            fi
-            url="https://raw.githubusercontent.com/${repo}/${tag}/patches-list.json"
-            curl -fsSL "$url" -o "$RUNNER_TEMP/patches-lists/${slug}.json" || \
-              echo "::warning::Failed to fetch patches-list.json for ${repo}; skipping."
-          done <<< "$REPO_PAIRS"
-
-          # Determine if existing patches.json is repo-keyed
-          EXISTING_IS_REPO_KEYED=false
-          if [ -s patches.json ] && jq -e 'type=="object"' patches.json >/dev/null 2>&1; then
-            if jq -e 'keys | map(select(contains("/"))) | length > 0' patches.json >/dev/null 2>&1; then
-              EXISTING_IS_REPO_KEYED=true
-            fi
-          fi
-
-          if [ "$EXISTING_IS_REPO_KEYED" = "true" ]; then
-            cp patches.json "$RUNNER_TEMP/patches_base.json"
-          else
-            echo '{}' > "$RUNNER_TEMP/patches_base.json"
-          fi
-
-          while IFS='|' read -r repo branch; do
-            slug="${repo//\//-}"
-            PATCHES_LIST="$RUNNER_TEMP/patches-lists/${slug}.json"
-            [ -f "$PATCHES_LIST" ] || continue
-
-            APPS_FOR_REPO="$(jq -c --arg r "$repo" '
-              [.patch_repos | to_entries[]
-                | select(.value.repo == $r)
-                | .key]
-            ' config.json)"
-
-            jq --argjson apps "$APPS_FOR_REPO" "$COMPAT_FN"'
-              . as $src
-              | reduce $apps[] as $pkg ({};
-                  .[$pkg] = (
-                    reduce (
-                      (($src.patches // $src)[])
-                      | select((compat_pkg_names(.) | index($pkg)) != null)
-                      | .name
-                    ) as $name
-                    ({};
-                      .[$name] = true
-                    )
-                  )
-                )
-            ' "$PATCHES_LIST" > "$RUNNER_TEMP/defaults_${slug}.json"
-
-            # Same merge logic as update-patches.yml: only upstream keys survive.
-            jq -n \
-              --arg repo "$repo" \
-              --slurpfile defaults "$RUNNER_TEMP/defaults_${slug}.json" \
-              --slurpfile base "$RUNNER_TEMP/patches_base.json" '
-              ($defaults[0] // {}) as $d
-              | ($base[0] // {}) as $existing
-              | ($existing[$repo] // {}) as $repo_existing
-              | reduce ($d | keys[]) as $pkg ({};
-                  .[$pkg] = (
-                    reduce ($d[$pkg] | keys[]) as $pname ({};
-                      .[$pname] = (($repo_existing[$pkg] // {})[$pname] // true)
-                    )
-                  )
-                )
-            ' > "$RUNNER_TEMP/merged_${slug}.json"
-
-            jq --arg repo "$repo" \
-               --slurpfile merged "$RUNNER_TEMP/merged_${slug}.json" \
-               '.[$repo] = $merged[0]' \
-               "$RUNNER_TEMP/patches_base.json" > "$RUNNER_TEMP/patches_next.json"
-            mv "$RUNNER_TEMP/patches_next.json" "$RUNNER_TEMP/patches_base.json"
-          done <<< "$REPO_PAIRS"
-
-          ACTIVE_REPOS="$(jq -c '[.patch_repos | to_entries[] | .value.repo] | unique' config.json)"
-          jq --argjson active "$ACTIVE_REPOS" \
-            'with_entries(select(.key as $k | $active | index($k) != null))' \
-            "$RUNNER_TEMP/patches_base.json" > patches.json.tmp
-          mv patches.json.tmp patches.json
-
-          fi # end REPO_PAIRS guard
+          # Sync patches.json to repo-keyed structure. Same logic as
+          # update-patches.yml — delegated to the shared sync-patches.sh
+          # script so there's exactly one implementation.
+          REPO_VERSIONS='${{ steps.version-check.outputs.repo-versions }}'
+          REPO_VERSIONS="$REPO_VERSIONS" \
+            CONFIG_FILE=./config.json \
+            PATCHES_FILE=./patches.json \
+            RUNNER_TEMP="$RUNNER_TEMP" \
+            bash "$GITHUB_WORKSPACE/.github/scripts/sync-patches.sh"
 
           # Ensure state file is valid JSON before merge/update.
           if [ ! -s state.json ] || ! jq -e 'type=="object"' state.json >/dev/null 2>&1; then
