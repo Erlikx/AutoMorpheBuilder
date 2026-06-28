@@ -27,6 +27,15 @@ const APK_MIRROR_API_PASS = process.env.APKMIRROR_API_PASS || "rm5rcfruUjKy04sMp
 const URL_CACHE_DIR = path.join(os.homedir(), ".cache", "auto-morphe-builder", "urls");
 
 /**
+ * Build the Authorization header for APKMirror's wp-json API.
+ * Used by both the URL resolver and the (now-removed) legacy API download path;
+ * kept centralized so the auth scheme stays in one place.
+ */
+function apkMirrorAuthHeader() {
+  return `Basic ${Buffer.from(`${APK_MIRROR_API_USER}:${APK_MIRROR_API_PASS}`).toString("base64")}`;
+}
+
+/**
  * Get APKMirror path for a package from config.json patch_repos.
  */
 function getApkmirrorPath(packageId) {
@@ -355,12 +364,11 @@ async function resolveApkmirrorApi(packageId, version) {
 
   // CORRECT API endpoint with Basic auth
   const apiUrl = `https://www.apkmirror.com/wp-json/apkm/v1/${apkmirrorPath}/${version}`;
-  const auth = Buffer.from(`${APK_MIRROR_API_USER}:${APK_MIRROR_API_PASS}`).toString("base64");
 
   try {
     const response = await fetch(apiUrl, {
       headers: {
-        "Authorization": `Basic ${auth}`,
+        "Authorization": apkMirrorAuthHeader(),
         "Accept": "application/json"
       }
     });
@@ -804,6 +812,12 @@ async function downloadWithApkeep(packageId, version, outputDir) {
 
 /**
  * Download using APKMirror API
+ *
+ * Resolves the URL via the apkmirror-api, then delegates the actual
+ * download (retries + APK version validation) to downloadWithUrl. This
+ * was previously a one-shot curl call without retry or version validation;
+ * routing through downloadWithUrl brings it in line with every other
+ * direct-URL path in the fallback chain.
  */
 async function downloadWithApkmirrorApi(packageId, version, outputDir) {
   console.error(`[apkmirror-api] Attempting download for ${packageId} v${version} via API`);
@@ -818,66 +832,22 @@ async function downloadWithApkmirrorApi(packageId, version, outputDir) {
     fs.mkdirSync(outputDir, { recursive: true });
   }
 
-  // Try to get download URL from APKMirror API
-  const apiUrl = `https://www.apkmirror.com/wp-json/apkm/v1/${apkmirrorPath}/${version}`;
+  // resolveApkmirrorApi throws on auth failure, API error, or missing
+  // downloadUrl — let it propagate so the caller's fallback chain can try
+  // the next source.
+  const { url: downloadUrl } = await resolveApkmirrorApi(packageId, version);
 
-  try {
-    // Make API request with basic auth
-    const auth = Buffer.from(`${APK_MIRROR_API_USER}:${APK_MIRROR_API_PASS}`).toString("base64");
+  // Delegate the actual download (retries + validateApkVersion + size checks)
+  // to downloadWithUrl. We override `source` so saveCachedUrl records the
+  // API as the resolver, not the generic direct-url path.
+  const result = await downloadWithUrl(downloadUrl, outputDir, packageId, version);
+  console.error(`[apkmirror-api] Downloaded via downloadWithUrl: ${result.path}`);
 
-    const response = await fetch(apiUrl, {
-      headers: {
-        "Authorization": `Basic ${auth}`,
-        "Accept": "application/json"
-      }
-    });
-
-    if (!response.ok) {
-      throw new Error(`API returned ${response.status}`);
-    }
-
-    const data = await response.json();
-    const downloadUrl = data.downloadUrl;
-
-    if (!downloadUrl) {
-      throw new Error("No download URL in API response");
-    }
-
-    console.error(`[apkmirror-api] Got download URL: ${downloadUrl}`);
-
-    // Download the file using curl
-    const filename = `${packageId.replace(/\./g, "_")}_v${version}.apk`;
-    const outputPath = path.join(outputDir, filename);
-
-    const curlResult = await new Promise((resolve, reject) => {
-      const curl = execFile("curl", [
-        "-L",
-        "-o", outputPath,
-        downloadUrl
-      ], { timeout: 300000 }, (error) => {
-        if (error) reject(error);
-        else resolve();
-      });
-    });
-
-    if (fs.existsSync(outputPath)) {
-      const stats = fs.statSync(outputPath);
-      console.error(`[apkmirror-api] Downloaded: ${outputPath} (${stats.size} bytes)`);
-
-      return {
-        success: true,
-        filepath: outputPath,
-        version: version,
-        source: "apkmirror-api",
-        url: downloadUrl
-      };
-    }
-
-    throw new Error("Download file not found");
-  } catch (e) {
-    console.error(`[apkmirror-api] Failed: ${e.message}`);
-    throw e;
-  }
+  return {
+    ...result,
+    source: "apkmirror-api",
+    url: downloadUrl,
+  };
 }
 
 /**
