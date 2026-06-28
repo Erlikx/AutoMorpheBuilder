@@ -55,7 +55,24 @@ Module._resolveFilename = function (req, parent, ...rest) {
     const original = fs.readFileSync(resolved, 'utf8');
     const patched = original.replace(CFT_TEMPLATE_REGEX, PATCHED_TEMPLATE);
     if (patched === original) {
-      // No change needed — either already patched, or upstream renamed the template.
+      // No change needed. Two possible reasons:
+      //   1. The file has already been patched in a previous run.
+      //   2. Upstream renamed or removed the `builds/cft/${browserVersion}/${suffix}`
+      //      template — this file's regex no longer matches anything, so we
+      //      silently fall through to the unmodified upstream file.
+      //
+      // Case (2) is the dangerous one: when PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST
+      // is set to the chrome-for-testing GCS bucket, the unpatched template
+      // produces a 404 from the bucket. Print a clear warning so a future
+      // playwright upgrade that moves the template lands here instead of as
+      // a confusing download failure in install-playwright-browsers.js.
+      console.error(
+        '::warning::patch-playwright-cft-path: regex did not match anything in ' +
+        'playwright-core registry/index.js. Either Playwright already ships the ' +
+        'patched template (good) or the upstream template was renamed and the ' +
+        'download will 404. If installs start failing, update CFT_TEMPLATE_REGEX ' +
+        'in this file to match the new template name.',
+      );
       return resolved;
     }
     const sibling = resolved + '.patched.js';
