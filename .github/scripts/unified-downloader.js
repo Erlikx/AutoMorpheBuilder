@@ -19,9 +19,9 @@ const { chromium } = require("playwright");
 const os = require("node:os");
 const cheerio = require('cheerio');
 
-// APKMirror API credentials (from environment, with fallback defaults)
-const APK_MIRROR_API_USER = process.env.APKMIRROR_API_USER || "api-apkupdater";
-const APK_MIRROR_API_PASS = process.env.APKMIRROR_API_PASS || "rm5rcfruUjKy04sMpyMPJXW8";
+// APKMirror API credentials (from environment; no defaults — see apkMirrorAuthHeader).
+const APK_MIRROR_API_USER = process.env.APKMIRROR_API_USER;
+const APK_MIRROR_API_PASS = process.env.APKMIRROR_API_PASS;
 
 // URL cache directory - stores resolved URLs as JSON
 const URL_CACHE_DIR = path.join(os.homedir(), ".cache", "auto-morphe-builder", "urls");
@@ -30,8 +30,20 @@ const URL_CACHE_DIR = path.join(os.homedir(), ".cache", "auto-morphe-builder", "
  * Build the Authorization header for APKMirror's wp-json API.
  * Used by both the URL resolver and the (now-removed) legacy API download path;
  * kept centralized so the auth scheme stays in one place.
+ *
+ * Throws if either credential is unset. The caller's fallback chain
+ * (apkeep → apkmirror Playwright) will then be used; the apkmirror-api
+ * path is just one of several resolution sources.
  */
 function apkMirrorAuthHeader() {
+  if (!APK_MIRROR_API_USER || !APK_MIRROR_API_PASS) {
+    throw new Error(
+      'APKMIRROR_API_USER and/or APKMIRROR_API_PASS are not set. ' +
+      'Configure them as repo secrets to enable the APKMirror-API ' +
+      'resolution path; the fallback chain (apkeep → apkmirror Playwright) ' +
+      'will be used otherwise.'
+    );
+  }
   return `Basic ${Buffer.from(`${APK_MIRROR_API_USER}:${APK_MIRROR_API_PASS}`).toString("base64")}`;
 }
 

@@ -54,6 +54,8 @@ Signed builds are enforced.
 | `KEYSTORE_PASSWORD` | Yes | Keystore password |
 | `KEY_ALIAS` | No | If empty, workflow picks first alias in keystore |
 | `KEY_PASSWORD` | No | Only needed when key password differs from keystore password |
+| `APKMIRROR_API_USER` | No | APKMirror-API Basic-auth user; when set, the APKMirror-API resolution path is used (faster than Playwright). Both this and `APKMIRROR_API_PASS` must be set together. |
+| `APKMIRROR_API_PASS` | No | APKMirror-API Basic-auth password (pair with `APKMIRROR_API_USER`). |
 
 ## Configuration Files
 

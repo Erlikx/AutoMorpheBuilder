@@ -36,8 +36,16 @@ Add:
 - `KEYSTORE_PASSWORD` (required)
 - `KEY_ALIAS` (optional, defaults to first alias found)
 - `KEY_PASSWORD` (optional, only if key password differs)
+- `APKMIRROR_API_USER` (optional; improves APK resolution speed when set)
+- `APKMIRROR_API_PASS` (optional; required alongside `APKMIRROR_API_USER`)
 
 Signed builds are enforced. Missing required signing secrets will fail the run.
+
+The APKMirror-API credentials are optional. When unset, the APK
+downloader's APKMirror-API path is skipped and the build falls through
+to the apkeep (APKPure) → APKMirror-scraper (Playwright) fallback chain.
+When set, APKMirror-API is tried in parallel with apkeep and usually
+wins, which avoids the slower Playwright session in most runs.
 
 ## 4. Configure `config.json`
 
