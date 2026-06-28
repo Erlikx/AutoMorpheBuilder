@@ -3,14 +3,13 @@
 /**
  * Unified APK Downloader
  * Downloads APK files from multiple sources with fallback chain:
- * 1. Check cache for existing APK
- * 2. Check patches.json for existing URL
+ * 1. URL cache (~/.cache/auto-morphe-builder/urls/)
+ * 2. config.json download_urls (auto-managed)
  * 3. apkeep (APKPure) - try first
  * 4. APKMirror API - second
  * 5. apkmirror with Playwright - last resort
  *
- * Cache: Downloads are cached in ~/.cache/auto-morphe-builder/apks/
- * Old versions are cleaned up when a new version is successfully downloaded
+ * Resolved URLs are cached so subsequent builds can skip the network round-trip.
  */
 
 const fs = require("node:fs");
@@ -23,9 +22,6 @@ const cheerio = require('cheerio');
 // APKMirror API credentials (from environment, with fallback defaults)
 const APK_MIRROR_API_USER = process.env.APKMIRROR_API_USER || "api-apkupdater";
 const APK_MIRROR_API_PASS = process.env.APKMIRROR_API_PASS || "rm5rcfruUjKy04sMpyMPJXW8";
-
-// Cache directory
-const CACHE_DIR = path.join(os.homedir(), ".cache", "auto-morphe-builder", "apks");
 
 // URL cache directory - stores resolved URLs as JSON
 const URL_CACHE_DIR = path.join(os.homedir(), ".cache", "auto-morphe-builder", "urls");
@@ -235,7 +231,7 @@ function saveCachedUrl(packageId, version, url, source) {
 
 /**
  * Prune URL cache entries for a package, keeping only the most-recently
- * updated ones. Mirrors cleanupOldVersions() used for the APK cache.
+ * updated ones.
  * @param {string} packageId
  * @param {number} keep Number of most-recent entries to retain (default 3).
  */
@@ -571,22 +567,6 @@ function parseArgs() {
 }
 
 /**
- * Load patches.json to check for existing URL
- */
-function loadPatchesJson() {
-  const patchesPath = path.join(process.cwd(), "patches.json");
-  if (!fs.existsSync(patchesPath)) {
-    return null;
-  }
-  try {
-    return JSON.parse(fs.readFileSync(patchesPath, "utf8"));
-  } catch (e) {
-    console.error(`Warning: Failed to parse patches.json: ${e.message}`);
-    return null;
-  }
-}
-
-/**
  * Load config.json
  */
 function loadConfig() {
@@ -823,115 +803,6 @@ async function downloadWithApkeep(packageId, version, outputDir) {
 
 
 /**
- * Check cache for existing APK
- */
-function checkCache(packageId, version) {
-  if (!fs.existsSync(CACHE_DIR)) {
-    return null;
-  }
-
-  // Look for files matching the package
-  const files = fs.readdirSync(CACHE_DIR);
-  const prefix = `${packageId.replace(/\./g, "_")}_v${version}`;
-
-  for (const file of files) {
-    if (file.startsWith(prefix)) {
-      const filepath = path.join(CACHE_DIR, file);
-
-      // Validate cached APK - check size and magic bytes
-      const stats = fs.statSync(filepath);
-      if (stats.size < 1000000) {
-        console.error(`[cache] Invalid cache (too small): ${filepath}, removing`);
-        fs.unlinkSync(filepath);
-        continue;
-      }
-
-      // Check magic bytes (PK = ZIP/APK)
-      const buffer = Buffer.alloc(2);
-      const fd = fs.openSync(filepath, 'r');
-      fs.readSync(fd, buffer, 0, 2, 0);
-      fs.closeSync(fd);
-
-      if (buffer[0] !== 0x50 || buffer[1] !== 0x4B) {
-        console.error(`[cache] Invalid cache (not APK): ${filepath}, removing`);
-        fs.unlinkSync(filepath);
-        continue;
-      }
-
-      console.error(`[cache] Found cached APK: ${filepath}`);
-      return filepath;
-    }
-  }
-
-  return null;
-}
-
-/**
- * Save to cache
- */
-function saveToCache(packageId, version, filepath) {
-  // Validate APK before caching - check file size and magic bytes
-  if (fs.existsSync(filepath)) {
-    const stats = fs.statSync(filepath);
-    if (stats.size < 1000000) { // Less than 1MB is suspicious
-      console.error(`[cache] Skipping cache - file too small (${stats.size} bytes)`);
-      return null;
-    }
-
-    // Check magic bytes (PK = ZIP/APK)
-    const buffer = Buffer.alloc(2);
-    const fd = fs.openSync(filepath, 'r');
-    fs.readSync(fd, buffer, 0, 2, 0);
-    fs.closeSync(fd);
-
-    if (buffer[0] !== 0x50 || buffer[1] !== 0x4B) {
-      console.error(`[cache] Skipping cache - not a valid APK (wrong magic bytes)`);
-      return null;
-    }
-  }
-
-  if (!fs.existsSync(CACHE_DIR)) {
-    fs.mkdirSync(CACHE_DIR, { recursive: true });
-  }
-
-  const ext = path.extname(filepath);
-  const filename = `${packageId.replace(/\./g, "_")}_v${version}${ext}`;
-  const destPath = path.join(CACHE_DIR, filename);
-
-  fs.copyFileSync(filepath, destPath);
-  console.error(`[cache] Saved to cache: ${destPath}`);
-
-  // Clean up old versions (keep only latest 2 per package)
-  cleanupOldVersions(packageId);
-}
-
-/**
- * Clean up old APK versions from cache
- */
-function cleanupOldVersions(packageId) {
-  if (!fs.existsSync(CACHE_DIR)) {
-    return;
-  }
-
-  const files = fs.readdirSync(CACHE_DIR);
-  const prefix = `${packageId.replace(/\./g, "_")}_v`;
-
-  // Get all versions for this package
-  const packageFiles = files
-    .filter(f => f.startsWith(prefix) && (f.endsWith(".apk") || f.endsWith(".xapk") || f.endsWith(".apkm")))
-    .sort()
-    .reverse();
-
-  // Keep only the latest 2 versions
-  const toDelete = packageFiles.slice(2);
-  for (const file of toDelete) {
-    const filepath = path.join(CACHE_DIR, file);
-    fs.unlinkSync(filepath);
-    console.error(`[cache] Removed old version: ${filepath}`);
-  }
-}
-
-/**
  * Download using APKMirror API
  */
 async function downloadWithApkmirrorApi(packageId, version, outputDir) {
@@ -992,9 +863,6 @@ async function downloadWithApkmirrorApi(packageId, version, outputDir) {
     if (fs.existsSync(outputPath)) {
       const stats = fs.statSync(outputPath);
       console.error(`[apkmirror-api] Downloaded: ${outputPath} (${stats.size} bytes)`);
-
-      // Save to cache
-      saveToCache(packageId, version, outputPath);
 
       return {
         success: true,
