@@ -122,4 +122,4 @@ No `morphe-build.yml` edits needed; the matrix is derived from `config.json`.
 
 ## Local environment
 
-No Node version pinned in `package.json`; whatever the GitHub Actions runner uses works. Tests use Jest only — no ESLint/Prettier config files exist; lint commands above are conventional. No OpenCode config (`opencode.json`) is present in the repo.
+`package.json` declares `engines.node >=24` to match the GitHub Actions runner (which uses `actions/setup-node` with `node-version: '24'`). Tests use Jest only. A flat-config ESLint setup exists at the repo root (`eslint.config.js`) and `npm run lint` runs it over `.github/scripts/`; the documented `npx eslint .github/scripts/*.js` command also works. No OpenCode config (`opencode.json`) is present in the repo.

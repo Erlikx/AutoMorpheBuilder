@@ -26,6 +26,19 @@ const APK_MIRROR_API_PASS = process.env.APKMIRROR_API_PASS;
 // URL cache directory - stores resolved URLs as JSON
 const URL_CACHE_DIR = path.join(os.homedir(), ".cache", "auto-morphe-builder", "urls");
 
+// Centralized timeout knobs (ms). Each one is named after the call site
+// where it applies, so a "why is apkeep hanging" question lands on the
+// right line in a single place. Tune these in one spot rather than
+// chasing inline magic numbers through the file.
+const TIMEOUTS = {
+  urlVerify:           5_000,   // HEAD probe for a cached URL.
+  apkeepResolve:      60_000,   // apkeep source resolution.
+  apkeepDownload:    180_000,   // apkeep APK download.
+  sourceResolve:      60_000,   // per-source timeout for parallelResolveSources.
+  commandDefault:    120_000,   // runCommand fallback when no override given.
+  playwrightDownload:120_000,   // page.waitForEvent('download') ceiling.
+};
+
 /**
  * Build the Authorization header for APKMirror's wp-json API.
  * Used by both the URL resolver and the (now-removed) legacy API download path;
@@ -301,7 +314,7 @@ async function verifyUrl(url) {
 
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5000); // 5 second timeout
+    const timeout = setTimeout(() => controller.abort(), TIMEOUTS.urlVerify);
 
     const response = await fetch(url, {
       method: 'HEAD',
@@ -342,7 +355,7 @@ async function resolveApkeep(packageId, version) {
   return new Promise((resolve, reject) => {
     const args = ['-a', `${packageId}@${version}`, '-d', 'apk-pure', tempFile];
 
-    execFile('apkeep', args, { timeout: 60000 }, (error, stdout, stderr) => {
+    execFile('apkeep', args, { timeout: TIMEOUTS.apkeepResolve }, (error, stdout, stderr) => {
       // Clean up temp file
       try { fs.unlinkSync(tempFile); fs.rmdirSync(tempDir); } catch (e) { /* ignore */ }
 
@@ -524,7 +537,7 @@ async function parallelResolveSources(packageId, version) {
     { name: 'apkmirror', fn: () => resolveApkmirror(packageId, version) },
   ];
 
-  const SOURCE_TIMEOUT = 60000; // 60 seconds each
+  const SOURCE_TIMEOUT = TIMEOUTS.sourceResolve;
 
   console.error(`[parallel-resolve] Starting parallel resolution for ${packageId} v${version}`);
   const startTime = Date.now();
@@ -625,7 +638,7 @@ function loadExistingUrl(packageId, version) {
  * Run command with execFile and timeout
  */
 function runCommand(cmd, args, options = {}) {
-  const timeout = options.timeout || 120000; // 2 minutes default
+  const timeout = options.timeout || TIMEOUTS.commandDefault;
 
   return new Promise((resolve, reject) => {
     const proc = execFile(cmd, args, {
@@ -782,7 +795,7 @@ async function downloadWithApkeep(packageId, version, outputDir) {
   let apkeepSucceeded = false;
   try {
     await runCommand("apkeep", ["-a", `${packageId}@${versionArg}`, "-d", "apk-pure", outputDir], {
-      timeout: 180000
+      timeout: TIMEOUTS.apkeepDownload
     });
 
     const apkPath = findApkFile(outputDir);
@@ -946,7 +959,7 @@ async function downloadViaPlaywright(apkmirrorPath, version, outputDir) {
     // Click the link inside the browser session so cookies are preserved for the download.
     // `force: true` because InMobi's overlay sometimes leaves a residual hit-target
     // even after we clicked AGREE.
-    const downloadPromise = page.waitForEvent('download', { timeout: 120000 });
+    const downloadPromise = page.waitForEvent('download', { timeout: TIMEOUTS.playwrightDownload });
     await page.click('#download-link', { force: true });
     const dl = await downloadPromise;
 
