@@ -1136,11 +1136,18 @@ jobs:
           echo "  APK: $APK"
           echo "  versionName: $APK_VERSION → $NEW_VERSION_NAME"
 
-          # Download apktool if not already present (idempotent)
-          APKTOOL_JAR="/tmp/apktool.jar"
+          # Download apktool if not already present (idempotent). The path
+          # includes the version so a runner that previously cached a
+          # different apktool version (e.g. 2.10.0) under /tmp/apktool.jar
+          # doesn't reuse it after a bump. apktool 2.10.0 chokes on
+          # newer APKs (YouTube 20.51.39+) with "empty string is not
+          # allowed for ignorable whitespace" from its bundled xmlpull
+          # library; 2.11+ replaced that with brut.j.xml (PR #3709)
+          # which handles the new format.
+          APKTOOL_JAR="/tmp/apktool-2.12.1.jar"
           if [ ! -f "$APKTOOL_JAR" ]; then
-            echo "Downloading apktool..."
-            curl -fsSL "https://github.com/iBotPeaches/Apktool/releases/download/v2.10.0/apktool_2.10.0.jar" -o "$APKTOOL_JAR"
+            echo "Downloading apktool 2.12.1..."
+            curl -fsSL "https://github.com/iBotPeaches/Apktool/releases/download/v2.12.1/apktool_2.12.1.jar" -o "$APKTOOL_JAR"
           fi
 
           WORK_DIR="/tmp/apk_work_$$"
