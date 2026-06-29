@@ -1296,4 +1296,6 @@ module.exports = {
   collectCookies,
   resolveApkmirrorUrl,
   cleanupOldUrls,
+  parallelResolveSources,
+  download,
 };
