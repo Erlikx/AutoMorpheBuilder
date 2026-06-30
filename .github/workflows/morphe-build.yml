@@ -1138,16 +1138,21 @@ jobs:
 
           # Download apktool if not already present (idempotent). The path
           # includes the version so a runner that previously cached a
-          # different apktool version (e.g. 2.10.0) under /tmp/apktool.jar
-          # doesn't reuse it after a bump. apktool 2.10.0 chokes on
+          # different apktool version (e.g. 2.10.0/2.12.1) under the bare
+          # path doesn't reuse it after a bump. apktool 2.10.0 chokes on
           # newer APKs (YouTube 20.51.39+) with "empty string is not
           # allowed for ignorable whitespace" from its bundled xmlpull
-          # library; 2.11+ replaced that with brut.j.xml (PR #3709)
-          # which handles the new format.
-          APKTOOL_JAR="/tmp/apktool-2.12.1.jar"
+          # library; 2.11+ replaced that with brut.j.xml (PR #3709).
+          # apktool 2.12.1 silently exits 1 on the same APKs (decompile
+          # output looks complete but the JVM returns non-zero with no
+          # error to stderr). 3.x is the "Apktool Remastered" rewrite
+          # (resource decoder rewritten against libs/androidfw + aapt2)
+          # and 3.0.1/3.0.2 are now stable patch releases that handle
+          # these APKs correctly.
+          APKTOOL_JAR="/tmp/apktool-3.0.2.jar"
           if [ ! -f "$APKTOOL_JAR" ]; then
-            echo "Downloading apktool 2.12.1..."
-            curl -fsSL "https://github.com/iBotPeaches/Apktool/releases/download/v2.12.1/apktool_2.12.1.jar" -o "$APKTOOL_JAR"
+            echo "Downloading apktool 3.0.2..."
+            curl -fsSL "https://github.com/iBotPeaches/Apktool/releases/download/v3.0.2/apktool_3.0.2.jar" -o "$APKTOOL_JAR"
           fi
 
           WORK_DIR="/tmp/apk_work_$$"
