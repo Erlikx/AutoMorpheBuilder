@@ -1169,7 +1169,7 @@ jobs:
           # Without this, apktool 3.0.2 silently exits 1 after
           # decompile. See apktool issue #4127.
           echo "Clearing apktool framework cache..."
-          java -jar "$APKTOOL_JAR" cf --force
+          java -jar "$APKTOOL_JAR" cf --all
 
           WORK_DIR="/tmp/apk_work_$$"
           MODIFIED_APK="/tmp/modified_$$.apk"
