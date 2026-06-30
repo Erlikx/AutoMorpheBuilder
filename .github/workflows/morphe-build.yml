@@ -1183,6 +1183,7 @@ jobs:
           set -e
 
           MANIFEST="$WORK_DIR/AndroidManifest.xml"
+          APKTOOL_YML="$WORK_DIR/apktool.yml"
           if [ ! -f "$MANIFEST" ]; then
             echo "::error::AndroidManifest.xml not found after decompile"
             echo "::error::apktool decompile exited with $APKTOOL_EXIT"
@@ -1191,9 +1192,18 @@ jobs:
           echo "apktool decompile exited with $APKTOOL_EXIT; continuing because output is valid."
 
           # Read current versionCode
-          CURRENT_VC=$(grep -oP 'versionCode="\K[0-9]+' "$MANIFEST" | head -1)
+          CURRENT_VC=$(grep -oP 'versionCode="\K[0-9]+' "$MANIFEST" | head -1 || true)
+          if [ -z "$CURRENT_VC" ] && [ -f "$APKTOOL_YML" ]; then
+            CURRENT_VC=$(grep -E '^[[:space:]]*versionCode:' "$APKTOOL_YML" | head -1 | sed -E "s/.*versionCode:[[:space:]]*'?([0-9]+)'?.*/\1/" || true)
+          fi
           if [ -z "$CURRENT_VC" ]; then
             echo "::error::Could not read versionCode from manifest"
+            echo "Manifest version attributes:"
+            grep -oE 'version(Name|Code)="[^"]*"' "$MANIFEST" || true
+            if [ -f "$APKTOOL_YML" ]; then
+              echo "apktool.yml versionInfo:"
+              grep -E '^[[:space:]]*version(Name|Code):' "$APKTOOL_YML" || true
+            fi
             exit 1
           fi
 
@@ -1204,14 +1214,31 @@ jobs:
           NEW_VC=$((CURRENT_VC + INCREMENT))
           echo "  versionCode: $CURRENT_VC → $NEW_VC"
 
-          # Patch manifest
-          sed -i 's/versionName="[^"]*"/versionName="'"$NEW_VERSION_NAME"'"/' "$MANIFEST"
-          sed -i 's/versionCode="[0-9]*"/versionCode="'"$NEW_VC"'"/' "$MANIFEST"
+          # Patch manifest and apktool metadata. Some apktool 3.x decodes
+          # carry version metadata in apktool.yml instead of manifest attrs.
+          if grep -q 'versionName="[^"]*"' "$MANIFEST"; then
+            sed -i 's/versionName="[^"]*"/versionName="'"$NEW_VERSION_NAME"'"/' "$MANIFEST"
+          else
+            echo "::warning::versionName not present in decoded manifest"
+          fi
+          if grep -q 'versionCode="[0-9]*"' "$MANIFEST"; then
+            sed -i 's/versionCode="[0-9]*"/versionCode="'"$NEW_VC"'"/' "$MANIFEST"
+          else
+            echo "::warning::versionCode not present in decoded manifest"
+          fi
+          if [ -f "$APKTOOL_YML" ]; then
+            sed -i -E "s/^([[:space:]]*versionName:[[:space:]]*)'?[^']*'?/\\1'$NEW_VERSION_NAME'/" "$APKTOOL_YML"
+            sed -i -E "s/^([[:space:]]*versionCode:[[:space:]]*)'?[0-9]+'?/\\1'$NEW_VC'/" "$APKTOOL_YML"
+          fi
 
           # Verify patches applied
           echo "  Patched manifest:"
-          grep -o 'versionName="[^"]*"' "$MANIFEST"
-          grep -o 'versionCode="[0-9]*"' "$MANIFEST"
+          grep -o 'versionName="[^"]*"' "$MANIFEST" || true
+          grep -o 'versionCode="[0-9]*"' "$MANIFEST" || true
+          if [ -f "$APKTOOL_YML" ]; then
+            echo "  Patched apktool.yml:"
+            grep -E '^[[:space:]]*version(Name|Code):' "$APKTOOL_YML" || true
+          fi
 
           # Rebuild APK
           echo "Rebuilding APK..."
