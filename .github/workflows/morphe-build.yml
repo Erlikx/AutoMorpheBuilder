@@ -1139,21 +1139,37 @@ jobs:
           # Download apktool if not already present (idempotent). The path
           # includes the version so a runner that previously cached a
           # different apktool version (e.g. 2.10.0/2.12.1) under the bare
-          # path doesn't reuse it after a bump. apktool 2.10.0 chokes on
-          # newer APKs (YouTube 20.51.39+) with "empty string is not
-          # allowed for ignorable whitespace" from its bundled xmlpull
-          # library; 2.11+ replaced that with brut.j.xml (PR #3709).
-          # apktool 2.12.1 silently exits 1 on the same APKs (decompile
-          # output looks complete but the JVM returns non-zero with no
-          # error to stderr). 3.x is the "Apktool Remastered" rewrite
-          # (resource decoder rewritten against libs/androidfw + aapt2)
-          # and 3.0.1/3.0.2 are now stable patch releases that handle
-          # these APKs correctly.
+          # path doesn't reuse it after a bump.
+          #
+          # apktool 2.10.0 chokes on newer APKs (YouTube 20.51.39+) with
+          # "empty string is not allowed for ignorable whitespace" from
+          # its bundled xmlpull library; 2.11+ replaced that with
+          # brut.j.xml (PR #3709). apktool 2.12.1 silently exits 1 on
+          # the same APKs (decompile output looks complete but the JVM
+          # returns non-zero with no error to stderr). 3.x is the
+          # "Apktool Remastered" rewrite (resource decoder rewritten
+          # against libs/androidfw + aapt2) and 3.0.2 handles modern APK
+          # formats, but it has its own gotcha: a stale framework file
+          # inherited from a 2.x apktool install on the runner image (or
+          # left over from a previous workflow run on the same runner)
+          # at ~/.local/share/apktool/framework/1.apk will be loaded by
+          # 3.0.2's rewritten decoder and then causes a silent exit 1
+          # after decompile completes -- exactly the same symptom the
+          # 2.12.1 run had. Confirmed root cause + fix (`apktool cf`) in
+          # upstream issue #4127 (apktool maintainer IgorEisberg). We
+          # always clear the framework cache below before each decompile.
           APKTOOL_JAR="/tmp/apktool-3.0.2.jar"
           if [ ! -f "$APKTOOL_JAR" ]; then
             echo "Downloading apktool 3.0.2..."
             curl -fsSL "https://github.com/iBotPeaches/Apktool/releases/download/v3.0.2/apktool_3.0.2.jar" -o "$APKTOOL_JAR"
           fi
+
+          # Clear any stale framework file inherited from a previous
+          # apktool version on this runner (image or past workflow run).
+          # Without this, apktool 3.0.2 silently exits 1 after
+          # decompile. See apktool issue #4127.
+          echo "Clearing apktool framework cache..."
+          java -jar "$APKTOOL_JAR" cf --force
 
           WORK_DIR="/tmp/apk_work_$$"
           MODIFIED_APK="/tmp/modified_$$.apk"
@@ -1161,13 +1177,18 @@ jobs:
 
           # Decompile APK
           echo "Decompiling APK with apktool..."
+          set +e
           java -jar "$APKTOOL_JAR" d -f "$APK" -o "$WORK_DIR"
+          APKTOOL_EXIT=$?
+          set -e
 
           MANIFEST="$WORK_DIR/AndroidManifest.xml"
           if [ ! -f "$MANIFEST" ]; then
             echo "::error::AndroidManifest.xml not found after decompile"
+            echo "::error::apktool decompile exited with $APKTOOL_EXIT"
             exit 1
           fi
+          echo "apktool decompile exited with $APKTOOL_EXIT; continuing because output is valid."
 
           # Read current versionCode
           CURRENT_VC=$(grep -oP 'versionCode="\K[0-9]+' "$MANIFEST" | head -1)
