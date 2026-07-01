@@ -341,10 +341,14 @@ jobs:
         run: |
           set -euo pipefail
           echo "Ensuring aapt is available for the unified-downloader..."
-          node "$GITHUB_WORKSPACE/.github/scripts/install-aapt.js"
-          # Build-tools version is exported to GITHUB_ENV by install-aapt.js
-          # so this and any later step can use it without a hardcoded path.
-          BT_DIR="$ANDROID_HOME/build-tools/${ANDROID_BUILD_TOOLS_VERSION}"
+          # install-aapt.js prints `ANDROID_BUILD_TOOLS_VERSION=<v>` on stdout
+          # (logs go to stderr). `$GITHUB_ENV` only takes effect for the
+          # NEXT step, not this one, so we read it back via command
+          # substitution here. The same value is also written to $GITHUB_ENV
+          # for subsequent steps to consume via ${{ env.* }}.
+          BT_VERSION="$(node "$GITHUB_WORKSPACE/.github/scripts/install-aapt.js" \
+            | grep '^ANDROID_BUILD_TOOLS_VERSION=' | cut -d= -f2)"
+          BT_DIR="$ANDROID_HOME/build-tools/${BT_VERSION}"
           # Add build-tools to PATH in *this* step too — the `$GITHUB_ENV` line
           # below only takes effect for subsequent steps.
           export PATH="${BT_DIR}:$PATH"
@@ -760,10 +764,9 @@ jobs:
           ANDROID_HOME: /tmp/android-sdk
         run: |
           set -euo pipefail
-          node "$GITHUB_WORKSPACE/.github/scripts/install-aapt.js"
-          # Build-tools version is exported to GITHUB_ENV by install-aapt.js
-          # so this and any later step can use it without a hardcoded path.
-          BT_DIR="$ANDROID_HOME/build-tools/${ANDROID_BUILD_TOOLS_VERSION}"
+          BT_VERSION="$(node "$GITHUB_WORKSPACE/.github/scripts/install-aapt.js" \
+            | grep '^ANDROID_BUILD_TOOLS_VERSION=' | cut -d= -f2)"
+          BT_DIR="$ANDROID_HOME/build-tools/${BT_VERSION}"
           # Add build-tools to PATH in *this* step too — the `$GITHUB_ENV` line
           # below only takes effect for subsequent steps.
           export PATH="${BT_DIR}:$PATH"

@@ -131,12 +131,17 @@ function main() {
     log('Caller must add $ANDROID_HOME/build-tools/<ver> to PATH for the unified-downloader to find aapt.');
   }
 
-  // Always export the build-tools version we target so workflow steps can
-  // reference it from `${{ env.ANDROID_BUILD_TOOLS_VERSION }}` instead of
-  // hardcoding the version in PATH exports. If aapt was preinstalled at a
-  // different version, callers can still override; we just stop the
-  // hardcoded-drift failure mode where the install script and the
-  // workflow PATH line disagree after a bump.
+  // Print the version to stdout so the same step that runs us can capture
+  // it via bash command substitution:
+  //   BT_VERSION="$(node install-aapt.js | grep '^ANDROID_BUILD_TOOLS_VERSION=' | cut -d= -f2)"
+  // $GITHUB_ENV does NOT propagate within a single step (only across steps),
+  // so command substitution is the only way to read it back in this step.
+  // All log lines go to stderr via log()/console.error, so they remain
+  // visible in the workflow log without polluting the captured value.
+  process.stdout.write(`ANDROID_BUILD_TOOLS_VERSION=${BUILD_TOOLS_VERSION}\n`);
+
+  // Also export to $GITHUB_ENV so *subsequent* steps in the same job can
+  // reference ${{ env.ANDROID_BUILD_TOOLS_VERSION }} without re-running.
   if (process.env.GITHUB_ENV) {
     try {
       fs.appendFileSync(process.env.GITHUB_ENV,
