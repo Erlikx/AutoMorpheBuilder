@@ -385,14 +385,28 @@ class AxmlPatcher {
     //    step 1, the strings data has shifted forward by 4 bytes, so the new
     //    insertion point is (oldChunkOff + oldStringsStart + 4 + newRelOffset).
     const newInsertionPoint = oldChunkOff + oldStringsStart + 4 + newRelOffset;
+    // AOSP's binary XML emitter pads the string pool after every append so
+    // chunk sizes stay 4-byte aligned (the start-element chunk's `size`
+    // field aapt reads next is computed relative to the string-pool end
+    // and has to be aligned too). Without this padding, a longer new name
+    // like "8.47.56+v1.32.0" — UTF-8 encoded as 18 bytes (1+1+15+1) — would
+    // push the chunk by 18 + 4 = 22 bytes, drifting the end by 2 from a 4
+    // boundary and making aapt reject the file with "AndroidManifest.xml
+    // is corrupt" / "size ... is not on an integer boundary". The padding
+    // bytes sit inside the strings data section but past the last entry
+    // in the offsets table, so the parser's offsets-table navigation
+    // never reads them.
+    const newStringPaddedLen = (newStringBytes.length + 3) & ~3;
+    const stringPadding = Buffer.alloc(newStringPaddedLen - newStringBytes.length);
     this.buf = Buffer.concat([
       this.buf.subarray(0, newInsertionPoint),
       newStringBytes,
+      stringPadding,
       this.buf.subarray(newInsertionPoint),
     ]);
 
     // 3. Bump string pool's chunk size and stringCount.
-    const addedBytes = newStringBytes.length + 4; // new string bytes + new offset entry
+    const addedBytes = newStringPaddedLen + 4; // padded string bytes + new offset entry
     const newChunkSize = oldChunkSize + addedBytes;
     this.buf.writeUInt32LE(newStringIdx + 1, oldChunkOff + 8); // stringCount
     this.buf.writeUInt32LE(newChunkSize, oldChunkOff + 4);     // chunk size
