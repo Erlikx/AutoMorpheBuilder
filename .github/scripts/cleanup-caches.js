@@ -51,11 +51,21 @@ const REPO =
   })();
 
 const CACHE_PATTERNS = {
-  'morphe-cli-': 'cli',
   'morphe-tools-cli-': 'cli',
+  'morphe-cli-': 'cli',
   'morphe-patches-': 'patches',
   'apk-': 'apk',
 };
+
+// `classifyCache` iterates Object.keys(CACHE_PATTERNS) in insertion order.
+// 'morphe-cli-' is a prefix of 'morphe-tools-cli-', so without this ordering
+// every morphe-tools-cli-* cache would be misclassified as the shorter
+// morphe-cli- group. We keep the longer prefix first so the more-specific
+// match wins. The map below re-asserts this order regardless of how the
+// keys above were entered — defence in depth against future reordering.
+const CACHE_PATTERNS_ORDERED = Object.keys(CACHE_PATTERNS).sort(
+  (a, b) => b.length - a.length
+);
 
 function loadState() {
   const p = path.join(process.cwd(), 'state.json');
@@ -143,7 +153,7 @@ function listCaches() {
 }
 
 function classifyCache(cache) {
-  for (const prefix of Object.keys(CACHE_PATTERNS)) {
+  for (const prefix of CACHE_PATTERNS_ORDERED) {
     if (cache.key.startsWith(prefix)) return prefix;
   }
   return null;
@@ -264,4 +274,16 @@ function main() {
   console.log(`\nDone. Deleted ${toDelete.length} stale cache(s).`);
 }
 
-main();
+// Export pure helpers for unit tests; only run main() when executed
+// directly (so `node cleanup-caches.js` works as before, and Jest can
+// `require()` the module without side-effects).
+module.exports = {
+  CACHE_PATTERNS,
+  CACHE_PATTERNS_ORDERED,
+  classifyCache,
+  isActive,
+  computeActiveKeys,
+  formatSize,
+};
+
+if (require.main === module) main();
