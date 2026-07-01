@@ -41,6 +41,6 @@ dist/
 build/
 
 # AI
-
+.claude/
 docs/
 CLAUDE.md
