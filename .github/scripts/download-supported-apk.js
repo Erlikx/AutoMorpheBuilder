@@ -241,14 +241,12 @@ console.log(`Downloading APK for ${APP_ID}...`);
 ensureDir(APKS_DIR);
 
 let downloadSuccess = false;
-let apkPath = null;
 
 // 1. Check for cached APK matching target version
 const cached = findCachedApk(APKS_DIR, TARGET_VERSION);
 if (cached) {
   console.log(`Using cached APK: ${cached} (v${TARGET_VERSION})`);
   downloadSuccess = true;
-  apkPath = cached;
 } else {
   // Clear stale files in APKS_DIR (preserves nothing for this run).
   try {
@@ -314,8 +312,6 @@ if (!downloadSuccess) {
           console.log(`Emergency fallback succeeded: ${JSON.stringify(dl.result)}`);
           // Update TARGET_VERSION so downstream validation picks it up.
           process.env.TARGET_VERSION = fallbackVersion;
-          // Force a re-validation pass below by clearing apkPath.
-          apkPath = null;
           downloadSuccess = true;
         } else {
           console.log(`Emergency fallback also failed: ${dl.error}`);

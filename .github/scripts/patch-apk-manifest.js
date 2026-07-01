@@ -37,35 +37,21 @@ const os = require('node:os');
 const path = require('node:path');
 
 // === AXML chunk / value constants (AOSP frameworks/base/include/androidfw/ResourceTypes.h) ===
-const RES_NULL_TYPE = 0x0000;
 const RES_STRING_POOL_TYPE = 0x0001;
 const RES_XML_TYPE = 0x0003;
-const RES_XML_START_NAMESPACE_TYPE = 0x0100;
-const RES_XML_END_NAMESPACE_TYPE = 0x0101;
 const RES_XML_START_ELEMENT_TYPE = 0x0102;
-const RES_XML_END_ELEMENT_TYPE = 0x0103;
-const RES_XML_CDATA_TYPE = 0x0104;
-const RES_XML_RESOURCE_MAP_TYPE = 0x0180;
 
 const UTF8_FLAG = 1 << 8;
 const SORTED_FLAG = 1 << 0;
 
-const TYPE_NULL = 0x00;
-const TYPE_REFERENCE = 0x01;
-const TYPE_ATTRIBUTE = 0x02;
 const TYPE_STRING = 0x03;
-const TYPE_FLOAT = 0x04;
-const TYPE_DIMENSION = 0x05;
-const TYPE_FRACTION = 0x06;
-const TYPE_FIRST_INT = 0x10;
 const TYPE_INT_DEC = 0x10;
-const TYPE_INT_HEX = 0x11;
-const TYPE_INT_BOOLEAN = 0x12;
 
 const STRING_POOL_HEADER_SIZE = 28;
 const RES_CHUNK_HEADER_SIZE = 8;
 const ATTR_SIZE = 20;
 const NO_ENTRY = 0xFFFFFFFF;
+const MAX_ANDROID_VERSION_CODE = 0x7FFFFFFF;
 
 function fail(msg, code = 1) {
   process.stderr.write(`[patch-apk-manifest] ${msg}\n`);
@@ -93,8 +79,8 @@ function parseArgs(argv) {
     const a = argv[i];
     if (a === '--version-code' || a === '--versionCode') {
       const v = Number(argv[++i]);
-      if (!Number.isFinite(v) || v < 0 || v > 0xFFFFFFFF) {
-        fail(`--version-code must be a uint32 integer, got: ${argv[i]}`);
+      if (!Number.isFinite(v) || v < 0 || v > MAX_ANDROID_VERSION_CODE) {
+        fail(`--version-code must be an Android signed 32-bit integer (0..${MAX_ANDROID_VERSION_CODE}), got: ${argv[i]}`);
       }
       opts.versionCode = v >>> 0;
     } else if (a === '--version-name' || a === '--versionName') {
@@ -238,12 +224,12 @@ class AxmlPatcher {
       //   null terminator (1 byte)
       let p = absOffset;
       const c0 = this.buf.readUInt8(p);
-      let charLen;
+      let _charLen;
       if (c0 & 0x80) {
-        charLen = ((c0 & 0x7F) << 8) | this.buf.readUInt8(p + 1);
+        _charLen = ((c0 & 0x7F) << 8) | this.buf.readUInt8(p + 1);
         p += 2;
       } else {
-        charLen = c0;
+        _charLen = c0;
         p += 1;
       }
       const b0 = this.buf.readUInt8(p);

@@ -11,7 +11,6 @@ const {
   CACHE_PATTERNS_ORDERED,
   classifyCache,
   isActive,
-  computeActiveKeys,
 } = require('../cleanup-caches');
 
 describe('CACHE_PATTERNS_ORDERED', () => {

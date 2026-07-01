@@ -172,22 +172,18 @@ describe('download() fallback chain', () => {
   const PKG = 'com.google.android.youtube';
   const VER = '20.44.38';
   let apksDir;
+  let homeDir;
 
   beforeEach(() => {
     jest.clearAllMocks();
     apksDir = tmpDir();
+    homeDir = tmpDir();
+    process.env.HOME = homeDir;
     delete global.fetch;
   });
   afterEach(() => {
     try { fs.rmSync(apksDir, { recursive: true, force: true }); } catch { /* ignore */ }
-    // Clean up any per-test URL cache file we wrote so re-runs don't
-    // see stale hits.
-    try {
-      const cacheFile = path.join(
-        os.homedir(), '.cache', 'auto-morphe-builder', 'urls', PKG, `${VER}.json`,
-      );
-      fs.unlinkSync(cacheFile);
-    } catch { /* ignore */ }
+    try { fs.rmSync(homeDir, { recursive: true, force: true }); } catch { /* ignore */ }
   });
 
   test('cache hit short-circuits the rest', async () => {

@@ -1247,9 +1247,21 @@ jobs:
           fi
 
           # Strip leading 'v', keep only digits, then mod+1 for a stable increment.
+          # Android's manifest versionCode is parsed as a signed int by aapt;
+          # Reddit currently ships at 2147483647, so any bump overflows and
+          # aapt reports versionCode='' even though versionName was patched.
           INCREMENT=$(echo "$PATCH_TAG" | sed -E 's/^v//; s/[^0-9]+//g')
           INCREMENT=$((INCREMENT % 10000 + 1))
-          NEW_VC=$((CURRENT_VC + INCREMENT))
+          MAX_VERSION_CODE=2147483647
+          if [ "$CURRENT_VC" -ge "$MAX_VERSION_CODE" ]; then
+            NEW_VC="$MAX_VERSION_CODE"
+            echo "::warning::Current versionCode is already at Android's signed 32-bit max; leaving versionCode unchanged and patching versionName only."
+          elif [ $((CURRENT_VC + INCREMENT)) -gt "$MAX_VERSION_CODE" ]; then
+            NEW_VC="$MAX_VERSION_CODE"
+            echo "::warning::Patch-tag versionCode bump would exceed Android's signed 32-bit max; clamping to $MAX_VERSION_CODE."
+          else
+            NEW_VC=$((CURRENT_VC + INCREMENT))
+          fi
           echo "  versionCode: $CURRENT_VC → $NEW_VC"
 
           # Patch the binary AndroidManifest.xml in place. The script

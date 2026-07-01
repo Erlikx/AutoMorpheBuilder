@@ -32,7 +32,7 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { execFileSync, execSync } = require('node:child_process');
+const { execFileSync } = require('node:child_process');
 
 // Playwright 1.58 enforces an `exports` field in its package.json, so deep
 // require paths must match. The subpath below is allowed by the exports map.
@@ -44,17 +44,12 @@ const BROWSERS_JSON_PATH = path.join(path.dirname(require.resolve('playwright-co
 const CACHE_DIR = process.env.PLAYWRIGHT_BROWSERS_PATH
   || path.join(process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache'), 'ms-playwright');
 
-const GCS_HOST = process.env.PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST
-  || process.env.PLAYWRIGHT_DOWNLOAD_HOST
-  || 'https://storage.googleapis.com/chrome-for-testing-public';
-
 /**
  * Resolve the download URL for a browser descriptor using Playwright's own
  * `_downloadURLs` method (after the cft-path patch has been loaded). The
  * patch file must be required before this script runs (via NODE_OPTIONS).
  */
 function resolveDownloadURLs(name) {
-  // eslint-disable-next-line global-require
   const registryModule = require(REGISTRY_PATH);
   const registry = registryModule.registry;
   const descriptors = JSON.parse(fs.readFileSync(BROWSERS_JSON_PATH, 'utf8')).browsers;
@@ -118,7 +113,6 @@ function download(url, destPath) {
 }
 
 function install(name) {
-  // eslint-disable-next-line global-require
   const registryModule = require(REGISTRY_PATH);
   const exec = registryModule.registry._executables.find((e) => e.name === name);
   const revision = exec.revision;

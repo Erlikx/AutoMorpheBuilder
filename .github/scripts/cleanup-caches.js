@@ -31,24 +31,26 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const APPLY = process.argv.includes('--apply');
-const REPO =
-  process.env.GITHUB_REPOSITORY ||
-  (() => {
-    // Fall back to the git origin if GH_REPOSITORY isn't set (local dev).
-    try {
-      const origin = execFileSync('git', ['remote', 'get-url', 'origin'], {
-        encoding: 'utf8',
-      }).trim();
-      const m = origin.match(/[:/]([\w.-]+)\/([\w.-]+?)(?:\.git)?$/);
-      if (m) return `${m[1]}/${m[2]}`;
-    } catch {
-      /* ignore */
-    }
-    throw new Error(
-      'GITHUB_REPOSITORY is not set and could not be inferred from git origin. ' +
-        'Set it (e.g. export GITHUB_REPOSITORY=owner/repo) or run from a CI runner.'
-    );
-  })();
+
+function resolveRepo() {
+  if (process.env.GITHUB_REPOSITORY) return process.env.GITHUB_REPOSITORY;
+
+  // Fall back to the git origin if GITHUB_REPOSITORY isn't set (local dev).
+  try {
+    const origin = execFileSync('git', ['remote', 'get-url', 'origin'], {
+      encoding: 'utf8',
+    }).trim();
+    const m = origin.match(/[:/]([\w.-]+)\/([\w.-]+?)(?:\.git)?$/);
+    if (m) return `${m[1]}/${m[2]}`;
+  } catch {
+    /* ignore */
+  }
+
+  throw new Error(
+    'GITHUB_REPOSITORY is not set and could not be inferred from git origin. ' +
+      'Set it (e.g. export GITHUB_REPOSITORY=owner/repo) or run from a CI runner.'
+  );
+}
 
 const CACHE_PATTERNS = {
   'morphe-tools-cli-': 'cli',
@@ -132,7 +134,7 @@ function computeActiveKeys() {
   return [...active];
 }
 
-function listCaches() {
+function listCaches(repo = resolveRepo()) {
   // gh cache list returns JSON when --json is set. id + key + createdAt is
   // the minimum we need.
   const out = execFileSync(
@@ -141,7 +143,7 @@ function listCaches() {
       'cache',
       'list',
       '--repo',
-      REPO,
+      repo,
       '--json',
       'id,key,createdAt,sizeInBytes',
       '--limit',
@@ -167,12 +169,12 @@ function isActive(cacheKey, activeKeys) {
   return false;
 }
 
-function deleteCache(cache) {
+function deleteCache(cache, repo = resolveRepo()) {
   // The `gh cache delete` command doesn't actually need a confirmation
   // flag — it deletes without prompting. The `--yes` flag was added in a
   // newer version of gh than the one currently on the runner, so we
   // don't pass it (it would be an "unknown flag" error on older gh).
-  execFileSync('gh', ['cache', 'delete', String(cache.id), '--repo', REPO], {
+  execFileSync('gh', ['cache', 'delete', String(cache.id), '--repo', repo], {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -191,7 +193,8 @@ function formatSize(bytes) {
 }
 
 function main() {
-  console.log(`Repository: ${REPO}`);
+  const repo = resolveRepo();
+  console.log(`Repository: ${repo}`);
   console.log(`Mode: ${APPLY ? 'APPLY' : 'DRY-RUN (use --apply to actually delete)'}`);
 
   const activeKeys = computeActiveKeys();
@@ -200,7 +203,7 @@ function main() {
 
   let caches;
   try {
-    caches = listCaches();
+    caches = listCaches(repo);
   } catch (e) {
     console.error(`Failed to list caches: ${e.message}`);
     process.exit(1);
@@ -223,7 +226,7 @@ function main() {
   // Build a "safe-to-keep" set: anything matching the active keys, plus
   // the single newest cache per pattern as a safety backup.
   const safeToKeep = new Set(activeKeys);
-  for (const [pattern, group] of byPattern.entries()) {
+  for (const group of byPattern.values()) {
     if (group[0]) safeToKeep.add(group[0].key);
   }
 
@@ -260,7 +263,7 @@ function main() {
   let failed = 0;
   for (const c of toDelete) {
     try {
-      deleteCache(c);
+      deleteCache(c, repo);
       console.log(`  deleted ${c.key}`);
     } catch (e) {
       failed++;
@@ -283,6 +286,7 @@ module.exports = {
   classifyCache,
   isActive,
   computeActiveKeys,
+  resolveRepo,
   formatSize,
 };
 

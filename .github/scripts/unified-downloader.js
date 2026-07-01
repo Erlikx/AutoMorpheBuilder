@@ -793,12 +793,13 @@ async function downloadWithApkeep(packageId, version, outputDir) {
   // Try SPECIFIC version first (what Morphe patches need)
   console.error(`[apkeep] Requesting specific version ${version}...`);
   let apkeepSucceeded = false;
+  let apkPath = null;
   try {
     await runCommand("apkeep", ["-a", `${packageId}@${versionArg}`, "-d", "apk-pure", outputDir], {
       timeout: TIMEOUTS.apkeepDownload
     });
 
-    const apkPath = findApkFile(outputDir);
+    apkPath = findApkFile(outputDir);
     if (apkPath) {
       const stats = fs.statSync(apkPath);
       if (stats.size > 1000) {
