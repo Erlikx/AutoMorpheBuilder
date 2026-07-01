@@ -831,7 +831,7 @@ jobs:
           fi
 
           RAW_KEYSTORE="$TOOLS_DIR/source.keystore"
-          DEST_KEYSTORE="$TOOLS_DIR/morphe.bks"
+          DEST_KEYSTORE="$TOOLS_DIR/morphe.p12"
           rm -f "$RAW_KEYSTORE" "$DEST_KEYSTORE"
 
           echo "$KEYSTORE_B64" | base64 -d > "$RAW_KEYSTORE"
@@ -861,19 +861,19 @@ jobs:
 
           IMPORT_LOG="$RUNNER_TEMP/keytool_import_${{ matrix.name }}.log"
           run_import() {
-            local mode="$1"
-            shift
-            echo "Converting keystore to BKS (mode=$mode)..."
-            set +e
-            "$@" >"$IMPORT_LOG" 2>&1
-            local rc=$?
-            set -e
-            if [ "$rc" -ne 0 ]; then
-              echo "::warning::keytool import failed in mode=$mode"
-              cat "$IMPORT_LOG" || true
-            fi
-            return "$rc"
-          }
+              local mode="$1"
+              shift
+              echo "Converting keystore to PKCS12 (mode=$mode)..."
+              set +e
+              "$@" >"$IMPORT_LOG" 2>&1
+              local rc=$?
+              set -e
+              if [ "$rc" -ne 0 ]; then
+                echo "::warning::keytool import failed in mode=$mode"
+                cat "$IMPORT_LOG" || true
+              fi
+              return "$rc"
+            }
 
           IMPORT_BASE_ARGS=(
             keytool -importkeystore -noprompt
@@ -881,7 +881,7 @@ jobs:
             -srcstoretype "$SRC_TYPE"
             -srcstorepass "$KEYSTORE_PASSWORD"
             -destkeystore "$DEST_KEYSTORE"
-            -deststoretype BKS
+            -deststoretype PKCS12
             -deststorepass "$KEYSTORE_PASSWORD"
             -providerclass org.bouncycastle.jce.provider.BouncyCastleProvider
             -providerpath "$BCPROV_JAR"
@@ -894,29 +894,27 @@ jobs:
             if [ -n "$KEY_PASSWORD_RAW" ]; then
               rm -f "$DEST_KEYSTORE"
               if ! run_import "explicit-keypass" "${IMPORT_BASE_ARGS[@]}" -srckeypass "$KEY_PASSWORD_RAW" -destkeypass "$KEY_PASSWORD_RAW"; then
-                echo "::error::Failed to convert keystore to BKS."
+                echo "::error::Failed to convert keystore to PKCS12."
                 echo "::error::Check KEYSTORE_PASSWORD and KEY_PASSWORD secrets."
                 exit 1
               fi
             else
-              echo "::error::Failed to convert keystore to BKS."
+              echo "::error::Failed to convert keystore to PKCS12."
               echo "::error::If your key password differs from KEYSTORE_PASSWORD, set KEY_PASSWORD secret."
               exit 1
             fi
           fi
 
           if [ ! -f "$DEST_KEYSTORE" ]; then
-            echo "::error::Failed to create converted BKS keystore."
+            echo "::error::Failed to create converted PKCS12 keystore."
             exit 1
           fi
 
           list_aliases() {
             keytool -list \
               -keystore "$DEST_KEYSTORE" \
-              -storetype BKS \
+              -storetype PKCS12 \
               -storepass "$KEYSTORE_PASSWORD" \
-              -providerclass org.bouncycastle.jce.provider.BouncyCastleProvider \
-              -providerpath "$BCPROV_JAR" \
               2>/dev/null | awk -F, '/,/{print $1}' | sed '/^$/d'
           }
 
@@ -947,7 +945,7 @@ jobs:
 
           echo "path=$DEST_KEYSTORE" >> "$GITHUB_OUTPUT"
           echo "alias=$KEY_ALIAS" >> "$GITHUB_OUTPUT"
-          echo "Prepared BKS keystore for Morphe signing."
+          echo "Prepared PKCS12 keystore for Morphe signing."
 
       - name: Patch ${{ matrix.name }} with morphe-cli
         id: patch
@@ -1226,7 +1224,10 @@ jobs:
           echo "Zipaligning..."
           zipalign -f 4 "$MODIFIED_APK" "$ALIGNED_APK"
 
-          # Re-sign with apksigner (BKS keystore needs BouncyCastle provider)
+          # Re-sign with apksigner. PKCS12 keystore is natively supported by
+          # apksigner (and morphe-cli's earlier signing step), so no
+          # --provider / --provider-classpath flags are needed. build-tools
+          # 35.0.0 removed those flags anyway.
           echo "Re-signing APK..."
           KEY_PASS_IN="${KEY_PASSWORD:-$KEYSTORE_PASSWORD}"
           apksigner sign \
@@ -1234,8 +1235,6 @@ jobs:
             --ks-key-alias "$KEY_ALIAS" \
             --ks-pass "pass:$KEYSTORE_PASSWORD" \
             --key-pass "pass:$KEY_PASS_IN" \
-            --provider "org.bouncycastle.jce.provider.BouncyCastleProvider" \
-            --provider-classpath /usr/share/java/bcprov.jar \
             "$ALIGNED_APK"
 
           # Replace original APK
