@@ -830,9 +830,24 @@ jobs:
             exit 1
           fi
 
+          # Two output keystores, both with the same credentials as the source:
+          #   morphe.bks — for morphe-cli. morphe-cli (via morphe-patcher) hardcodes
+          #     KeyStore.getInstance("BKS", BouncyCastleProvider.PROVIDER_NAME) in
+          #     ApkSigner.kt to load the signing keystore. A PKCS12 file fails with
+          #     "Wrong version of key store" because BouncyCastle's BKS loader
+          #     checks the file magic and PKCS12 doesn't have it.
+          #   morphe.p12 — for apksigner. apksigner in build-tools 35.0.0 dropped
+          #     the `--provider-classpath` flag, and apksigner.jar doesn't bundle
+          #     BouncyCastle, so BKS would require us to extend the classpath via
+          #     `java -cp apksigner.jar:bcprov.jar` (bypassing the apksigner
+          #     shell wrapper). PKCS12 is the standard JCE default type, so the
+          #     apksigner call is a one-liner with no provider plumbing.
+          # Both are produced from the same source so a single KEYSTORE_BASE64
+          # secret serves both consumers.
           RAW_KEYSTORE="$TOOLS_DIR/source.keystore"
-          DEST_KEYSTORE="$TOOLS_DIR/morphe.p12"
-          rm -f "$RAW_KEYSTORE" "$DEST_KEYSTORE"
+          BKS_KEYSTORE="$TOOLS_DIR/morphe.bks"
+          P12_KEYSTORE="$TOOLS_DIR/morphe.p12"
+          rm -f "$RAW_KEYSTORE" "$BKS_KEYSTORE" "$P12_KEYSTORE"
 
           echo "$KEYSTORE_B64" | base64 -d > "$RAW_KEYSTORE"
 
@@ -862,8 +877,9 @@ jobs:
           IMPORT_LOG="$RUNNER_TEMP/keytool_import_${{ matrix.name }}.log"
           run_import() {
               local mode="$1"
-              shift
-              echo "Converting keystore to PKCS12 (mode=$mode)..."
+              local dest="$2"
+              shift 2
+              echo "Converting keystore to $dest (mode=$mode)..."
               set +e
               "$@" >"$IMPORT_LOG" 2>&1
               local rc=$?
@@ -880,41 +896,79 @@ jobs:
             -srckeystore "$RAW_KEYSTORE"
             -srcstoretype "$SRC_TYPE"
             -srcstorepass "$KEYSTORE_PASSWORD"
-            -destkeystore "$DEST_KEYSTORE"
-            -deststoretype PKCS12
             -deststorepass "$KEYSTORE_PASSWORD"
             -providerclass org.bouncycastle.jce.provider.BouncyCastleProvider
             -providerpath "$BCPROV_JAR"
           )
 
+          BKS_IMPORT_ARGS=(
+            "${IMPORT_BASE_ARGS[@]}"
+            -destkeystore "$BKS_KEYSTORE"
+            -deststoretype BKS
+          )
+
           # Try import without explicit key password first. This works for the common case where
           # key password matches store password and avoids false failures from wrong KEY_PASSWORD.
-          if ! run_import "no-keypass" "${IMPORT_BASE_ARGS[@]}"; then
+          if ! run_import "no-keypass" "BKS" "${BKS_IMPORT_ARGS[@]}"; then
             # Retry with explicit key password if provided.
             if [ -n "$KEY_PASSWORD_RAW" ]; then
-              rm -f "$DEST_KEYSTORE"
-              if ! run_import "explicit-keypass" "${IMPORT_BASE_ARGS[@]}" -srckeypass "$KEY_PASSWORD_RAW" -destkeypass "$KEY_PASSWORD_RAW"; then
-                echo "::error::Failed to convert keystore to PKCS12."
+              rm -f "$BKS_KEYSTORE"
+              if ! run_import "explicit-keypass" "BKS" "${BKS_IMPORT_ARGS[@]}" -srckeypass "$KEY_PASSWORD_RAW" -destkeypass "$KEY_PASSWORD_RAW"; then
+                echo "::error::Failed to convert keystore to BKS."
                 echo "::error::Check KEYSTORE_PASSWORD and KEY_PASSWORD secrets."
                 exit 1
               fi
             else
-              echo "::error::Failed to convert keystore to PKCS12."
+              echo "::error::Failed to convert keystore to BKS."
               echo "::error::If your key password differs from KEYSTORE_PASSWORD, set KEY_PASSWORD secret."
               exit 1
             fi
           fi
 
-          if [ ! -f "$DEST_KEYSTORE" ]; then
-            echo "::error::Failed to create converted PKCS12 keystore."
+          if [ ! -f "$BKS_KEYSTORE" ]; then
+            echo "::error::Failed to create converted BKS keystore."
+            exit 1
+          fi
+
+          # Derive the PKCS12 copy for apksigner from the BKS one we just produced.
+          # BKS -> PKCS12 keeps the same key material and passwords; we just need a
+          # second keytool pass with the BKS keystore as source and PKCS12 as dest.
+          # BC provider still has to be on the classpath because keytool needs it to
+          # *read* the BKS source. Without it this fails with the same "Wrong version
+          # of key store" error morphe-cli itself surfaced.
+          P12_IMPORT_ARGS=(
+            "${IMPORT_BASE_ARGS[@]}"
+            -srckeystore "$BKS_KEYSTORE"
+            -srcstoretype BKS
+            -destkeystore "$P12_KEYSTORE"
+            -deststoretype PKCS12
+          )
+
+          if ! run_import "no-keypass" "PKCS12" "${P12_IMPORT_ARGS[@]}"; then
+            if [ -n "$KEY_PASSWORD_RAW" ]; then
+              rm -f "$P12_KEYSTORE"
+              if ! run_import "explicit-keypass" "PKCS12" "${P12_IMPORT_ARGS[@]}" -srckeypass "$KEY_PASSWORD_RAW" -destkeypass "$KEY_PASSWORD_RAW"; then
+                echo "::error::Failed to convert BKS keystore to PKCS12 for apksigner."
+                exit 1
+              fi
+            else
+              echo "::error::Failed to convert BKS keystore to PKCS12 for apksigner."
+              exit 1
+            fi
+          fi
+
+          if [ ! -f "$P12_KEYSTORE" ]; then
+            echo "::error::Failed to create PKCS12 keystore for apksigner."
             exit 1
           fi
 
           list_aliases() {
             keytool -list \
-              -keystore "$DEST_KEYSTORE" \
-              -storetype PKCS12 \
+              -keystore "$BKS_KEYSTORE" \
+              -storetype BKS \
               -storepass "$KEYSTORE_PASSWORD" \
+              -providerclass org.bouncycastle.jce.provider.BouncyCastleProvider \
+              -providerpath "$BCPROV_JAR" \
               2>/dev/null | awk -F, '/,/{print $1}' | sed '/^$/d'
           }
 
@@ -943,9 +997,10 @@ jobs:
             fi
           fi
 
-          echo "path=$DEST_KEYSTORE" >> "$GITHUB_OUTPUT"
+          echo "path=$BKS_KEYSTORE" >> "$GITHUB_OUTPUT"
+          echo "p12_path=$P12_KEYSTORE" >> "$GITHUB_OUTPUT"
           echo "alias=$KEY_ALIAS" >> "$GITHUB_OUTPUT"
-          echo "Prepared PKCS12 keystore for Morphe signing."
+          echo "Prepared BKS keystore for morphe-cli and PKCS12 keystore for apksigner."
 
       - name: Patch ${{ matrix.name }} with morphe-cli
         id: patch
@@ -1121,7 +1176,7 @@ jobs:
       - name: Patch APK version for Obtainium
         if: success()
         env:
-          KEYSTORE_FILE: ${{ steps.keystore.outputs.path }}
+          KEYSTORE_FILE: ${{ steps.keystore.outputs.p12_path }}
           KEY_ALIAS: ${{ steps.keystore.outputs.alias }}
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
@@ -1224,10 +1279,12 @@ jobs:
           echo "Zipaligning..."
           zipalign -f 4 "$MODIFIED_APK" "$ALIGNED_APK"
 
-          # Re-sign with apksigner. PKCS12 keystore is natively supported by
-          # apksigner (and morphe-cli's earlier signing step), so no
-          # --provider / --provider-classpath flags are needed. build-tools
-          # 35.0.0 removed those flags anyway.
+          # Re-sign with apksigner. KEYSTORE_FILE is the PKCS12 copy produced
+          # earlier (steps.keystore.outputs.p12_path), which apksigner reads
+          # natively via the default JCE provider — no provider plumbing
+          # needed. The morphe-cli signing step (steps.patch above) used the
+          # BKS copy at steps.keystore.outputs.path because morphe-patcher
+          # hardcodes `KeyStore.getInstance("BKS", BouncyCastleProvider...)`.
           echo "Re-signing APK..."
           KEY_PASS_IN="${KEY_PASSWORD:-$KEYSTORE_PASSWORD}"
           apksigner sign \
