@@ -1265,8 +1265,24 @@ jobs:
           # on zipalign + apksigner. Compare both attributes in one regex
           # so we catch a partial rewrite (e.g. versionCode updated but
           # versionName stale, or vice versa).
+          #
+          # `|| VERIFIED=""` is the load-bearing bit: set -euo pipefail
+          # would otherwise kill the script at this $() the moment aapt
+          # exits non-zero, before any friendly diagnostic runs. APKs for
+          # which aapt can't fully re-parse the patched AXML still happen
+          # to be valid (patch-apk-manifest.js reported success on them),
+          # but the regex below wouldn't find versionCode/versionName, so
+          # we want to fall through to the explicit empty-result branch
+          # and surface a real error message instead of a generic exit-1.
           VERIFIED=$(aapt dump badging "$MODIFIED_APK" 2>/dev/null \
-            | sed -nE "s/.*versionCode='([0-9]+)' versionName='([^']+)'.*/\1 \2/p" | head -1)
+            | sed -nE "s/.*versionCode='([0-9]+)' versionName='([^']+)'.*/\1 \2/p" | head -1) \
+            || VERIFIED=""
+          if [ -z "$VERIFIED" ]; then
+            echo "::error::aapt dump badging failed or returned no version info for $MODIFIED_APK"
+            echo "patch-apk-manifest.js reported success; dumping aapt output for triage:"
+            aapt dump badging "$MODIFIED_APK" 2>&1 | head -40 || true
+            exit 1
+          fi
           if [ "$VERIFIED" != "$NEW_VC $NEW_VERSION_NAME" ]; then
             echo "::error::patch-apk-manifest.js did not produce expected versionCode/versionName"
             echo "  expected: $NEW_VC $NEW_VERSION_NAME"
