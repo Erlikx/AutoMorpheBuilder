@@ -30,8 +30,8 @@ const path = require('node:path');
 const { execFileSync, spawnSync } = require('node:child_process');
 
 const SDK_ROOT = process.env.ANDROID_HOME || path.join(os.tmpdir(), 'android-sdk');
-const CMDLINE_TOOLS_URL = 'https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip';
-const BUILD_TOOLS_VERSION = '34.0.0';
+const CMDLINE_TOOLS_URL = 'https://dl.google.com/android/repository/commandlinetools-linux-14742923_latest.zip';
+const BUILD_TOOLS_VERSION = '35.0.0';
 
 function log(msg) {
   console.error(`[aapt-install] ${msg}`);
@@ -123,13 +123,28 @@ function installBuildTools() {
 function main() {
   if (alreadyInstalled()) {
     log('aapt is already on PATH — nothing to do');
-    return;
+  } else {
+    ensureCmdlineTools();
+    acceptLicenses();
+    installBuildTools();
+    log(`Done. aapt is at ${SDK_ROOT}/build-tools/${BUILD_TOOLS_VERSION}/aapt`);
+    log('Caller must add $ANDROID_HOME/build-tools/<ver> to PATH for the unified-downloader to find aapt.');
   }
-  ensureCmdlineTools();
-  acceptLicenses();
-  installBuildTools();
-  log(`Done. aapt is at ${SDK_ROOT}/build-tools/${BUILD_TOOLS_VERSION}/aapt`);
-  log('Caller must add $ANDROID_HOME/build-tools/<ver> to PATH for the unified-downloader to find aapt.');
+
+  // Always export the build-tools version we target so workflow steps can
+  // reference it from `${{ env.ANDROID_BUILD_TOOLS_VERSION }}` instead of
+  // hardcoding the version in PATH exports. If aapt was preinstalled at a
+  // different version, callers can still override; we just stop the
+  // hardcoded-drift failure mode where the install script and the
+  // workflow PATH line disagree after a bump.
+  if (process.env.GITHUB_ENV) {
+    try {
+      fs.appendFileSync(process.env.GITHUB_ENV,
+        `ANDROID_BUILD_TOOLS_VERSION=${BUILD_TOOLS_VERSION}\n`);
+    } catch (e) {
+      log(`warning: could not write to GITHUB_ENV: ${e.message}`);
+    }
+  }
 }
 
 try {
