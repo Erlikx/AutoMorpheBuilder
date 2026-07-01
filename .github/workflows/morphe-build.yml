@@ -1492,7 +1492,8 @@ jobs:
           # Sync patches.json to repo-keyed structure. Same logic as
           # update-patches.yml — delegated to the shared sync-patches.sh
           # script so there's exactly one implementation.
-          CONFIG_FILE=./config.json \
+          REPO_VERSIONS="$REPO_VERSIONS" \
+            CONFIG_FILE=./config.json \
             PATCHES_FILE=./patches.json \
             RUNNER_TEMP="$RUNNER_TEMP" \
             bash "$GITHUB_WORKSPACE/.github/scripts/sync-patches.sh"
