@@ -1144,56 +1144,35 @@ jobs:
           echo "  APK: $APK"
           echo "  versionName: $APK_VERSION → $NEW_VERSION_NAME"
 
-          # Replace apktool with androidmanifest-changer (a single-purpose
-          # binary AndroidManifest.xml patcher). The full apktool
-          # decompile/edit/rebuild round-trip is unnecessary surface area
-          # for what is ultimately a two-attribute manifest mutation, and
-          # three apktool versions in a row (2.10.0, 2.12.1, 3.0.2) have
-          # silently exit-1'd on the Morphe-patched YouTube/YT Music/Reddit
-          # APKs that this builder produces -- for three different reasons
-          # (xmlpull parser bug, no-stderr silent exit, framework-cache
-          # pollution). androidmanifest-changer rewrites only the binary
-          # AXML, leaves the rest of the zip untouched, and needs no JVM.
+          # Patch the binary AndroidManifest.xml in place via a tiny Node.js
+          # walker (scripts/patch-apk-manifest.js). History of this step:
+          #   - apktool 2.10.0/2.12.1/3.0.2 all silently exit-1'd on the
+          #     Morphe-patched YouTube/YT Music/Reddit APKs (three different
+          #     reasons: xmlpull parser bug, no-stderr silent exit,
+          #     framework-cache pollution).
+          #   - ensody/androidmanifest-changer v1.0.1 was the next attempt;
+          #     it shells out to system `aapt2 convert` which crashes on
+          #     the same APKs with `XmlDom.cpp:356 Check failed:
+          #     !node_stack.empty()`. We tried build-tools 35.0.0 to see if
+          #     Google had fixed the assertion -- they hadn't.
+          #   - This script walks the AXML chunk structure directly (AOSP
+          #     ResourceTypes.h is the spec). There are no third-party
+          #     parser assertions to trip, no JVM, no aapt round-trip. Just
+          #     a focused binary edit: overwrite the versionCode int32 in
+          #     place, append the versionName string to the pool, bump the
+          #     relevant chunk sizes. `zip -f` swaps the entry in place so
+          #     entry order and per-entry metadata are preserved.
           #
           # Runtime requirements (verified below):
-          #   - `zip`   on PATH (upstream README states Go's archive/zip
-          #             library produces invalid APKs, so the external
-          #             `zip` CLI is mandatory).
-          #   - `aapt2` on PATH (only for APK, not AAB). Already installed
-          #             earlier in this job by .github/scripts/install-aapt.js
-          #             which provisions build-tools and adds it to PATH;
-          #             `aapt dump badging` reuses the same binary.
-          AMC_VERSION="1.0.1"
-          AMC_TAG="v${AMC_VERSION}"
-          AMC_TARBALL="/tmp/androidmanifest-changer_${AMC_VERSION}_Linux_x86_64.tar.gz"
-          AMC_SHA_FILE="${AMC_TARBALL}.sha256"
-          AMC_DIR="/tmp/androidmanifest-changer-${AMC_VERSION}"
-          if [ ! -x "${AMC_DIR}/androidmanifest-changer" ]; then
-            echo "Downloading androidmanifest-changer ${AMC_TAG}..."
-            curl -fsSL \
-              "https://github.com/ensody/androidmanifest-changer/releases/download/${AMC_TAG}/androidmanifest-changer_${AMC_VERSION}_Linux_x86_64.tar.gz" \
-              -o "${AMC_TARBALL}"
-            # goreleaser publishes a per-file SHA256 alongside every
-            # release. Verify the tarball before extracting. Optional
-            # (--ignore-missing) so the same checksums file works even if
-            # we only download the Linux x86_64 asset.
-            curl -fsSL \
-              "https://github.com/ensody/androidmanifest-changer/releases/download/${AMC_TAG}/androidmanifest-changer_${AMC_VERSION}_checksums.txt" \
-              -o "${AMC_SHA_FILE}"
-            ( cd "$(dirname "${AMC_TARBALL}")" && \
-              sha256sum --ignore-missing -c "$(basename "${AMC_SHA_FILE}")" )
-            rm -rf "${AMC_DIR}"
-            mkdir -p "${AMC_DIR}"
-            tar -xzf "${AMC_TARBALL}" -C "${AMC_DIR}"
-            chmod +x "${AMC_DIR}/androidmanifest-changer"
-            rm -f "${AMC_TARBALL}" "${AMC_SHA_FILE}"
-          fi
-
-          # androidmanifest-changer shells out to the system `zip` binary
-          # (see README "Requirements"). ubuntu-latest ships it; this guard
-          # produces a clear failure if a runner image ever changes.
+          #   - `zip` on PATH. patch-apk-manifest.js shells out to the
+          #     system `zip` binary (same reason androidmanifest-changer
+          #     did: Go's archive/zip produces invalid APKs). ubuntu-latest
+          #     ships it via the `unzip` parent package.
+          #   - `aapt` on PATH. Already installed earlier in this job by
+          #     .github/scripts/install-aapt.js (the same tool reused for
+          #     `aapt dump badging` below).
           if ! command -v zip >/dev/null 2>&1; then
-            echo "::error::zip CLI is required by androidmanifest-changer but not on PATH"
+            echo "::error::zip CLI is required by patch-apk-manifest.js but not on PATH"
             echo "Install with: sudo apt-get install -y zip"
             exit 1
           fi
@@ -1201,22 +1180,16 @@ jobs:
           MODIFIED_APK="/tmp/modified_$$.apk"
           ALIGNED_APK="/tmp/aligned_$$.apk"
 
-          # Work on a copy: androidmanifest-changer rewrites its input file
-          # in place, so a partial/failed patch leaves the original $APK
-          # intact and the build will surface a clean error.
-          cp "$APK" "$MODIFIED_APK"
-
-          # Read the current versionCode via aapt (the same tool that
-          # install-aapt.js provisions for the unified-downloader's APK
-          # validation). The PATCH_TAG-derived deterministic bump below
+          # Read the current versionCode via aapt (no apktool decompile
+          # needed). The PATCH_TAG-derived deterministic bump below
           # preserves the formula the apktool-based flow used, so
           # rebuilds with the same APK + patch tag still produce the
           # same NEW_VC.
-          CURRENT_VC=$(aapt dump badging "$MODIFIED_APK" 2>/dev/null \
+          CURRENT_VC=$(aapt dump badging "$APK" 2>/dev/null \
             | sed -nE "s/.*versionCode='([0-9]+)'.*/\1/p" | head -1)
           if [ -z "$CURRENT_VC" ]; then
             echo "::error::Could not read versionCode from APK"
-            aapt dump badging "$MODIFIED_APK" 2>&1 | grep -E '^package: ' || true
+            aapt dump badging "$APK" 2>&1 | grep -E '^package: ' || true
             exit 1
           fi
 
@@ -1226,13 +1199,14 @@ jobs:
           NEW_VC=$((CURRENT_VC + INCREMENT))
           echo "  versionCode: $CURRENT_VC → $NEW_VC"
 
-          # Patch the binary AndroidManifest.xml in place. Only the root
-          # <manifest> attrs change; the rest of the zip is untouched so
-          # zipalign + apksigner below operate on valid input.
-          "${AMC_DIR}/androidmanifest-changer" \
-            --versionCode "$NEW_VC" \
-            --versionName "$NEW_VERSION_NAME" \
-            "$MODIFIED_APK"
+          # Patch the binary AndroidManifest.xml in place. The script
+          # copies $APK → $MODIFIED_APK internally, mutates the manifest
+          # entry via `zip -f`, and exits non-zero on any structural error
+          # so `set -euo pipefail` surfaces it cleanly.
+          node "$GITHUB_WORKSPACE/.github/scripts/patch-apk-manifest.js" \
+            "$APK" "$MODIFIED_APK" \
+            --version-code "$NEW_VC" \
+            --version-name "$NEW_VERSION_NAME"
 
           # Sanity-check the patch actually landed before spending cycles
           # on zipalign + apksigner. Compare both attributes in one regex
@@ -1241,7 +1215,7 @@ jobs:
           VERIFIED=$(aapt dump badging "$MODIFIED_APK" 2>/dev/null \
             | sed -nE "s/.*versionCode='([0-9]+)' versionName='([^']+)'.*/\1 \2/p" | head -1)
           if [ "$VERIFIED" != "$NEW_VC $NEW_VERSION_NAME" ]; then
-            echo "::error::androidmanifest-changer did not produce expected versionCode/versionName"
+            echo "::error::patch-apk-manifest.js did not produce expected versionCode/versionName"
             echo "  expected: $NEW_VC $NEW_VERSION_NAME"
             echo "  got:      $VERIFIED"
             exit 1
