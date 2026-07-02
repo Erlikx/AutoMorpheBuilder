@@ -28,6 +28,7 @@ set -Eeuo pipefail
 . "$(dirname "$0")/lib/common.sh"
 . "$(dirname "$0")/lib/json.sh"
 . "$(dirname "$0")/lib/config.sh"
+. "$(dirname "$0")/lib/github.sh"
 
 TOOLS_DIR="${TOOLS_DIR:-./tools}"
 REPO_VERSIONS="${REPO_VERSIONS:-}"
