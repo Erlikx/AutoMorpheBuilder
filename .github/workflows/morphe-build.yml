@@ -173,14 +173,12 @@ jobs:
       - name: Verify dependencies
         id: deps
         run: |
-          set -euo pipefail
           for tool in curl jq unzip; do
-            if command -v "$tool" >/dev/null 2>&1; then
-              echo "✓ $tool found: $(command -v "$tool")"
-            else
+            if ! command -v "$tool" >/dev/null 2>&1; then
               echo "::error::$tool not found"
               exit 1
             fi
+            echo "✓ $tool found: $(command -v "$tool")"
           done
 
       - name: Install BouncyCastle
@@ -233,7 +231,6 @@ jobs:
 
       - name: Ensure apkeep is available
         run: |
-          set -euo pipefail
           if ! command -v apkeep >/dev/null 2>&1; then
             echo "::warning::apkeep missing after artifact restore; reinstalling"
             bash scripts/install_apkeep.sh
@@ -263,67 +260,8 @@ jobs:
           PATCH_TAG: ${{ matrix.patchTag }}
           PATCH_SLUG: ${{ matrix.patchSlug }}
           CLI_VERSION: ${{ env.CLI_VERSION }}
-        run: |
-          set -euo pipefail
-          if [ -z "${PATCH_REPO:-}" ] || [ -z "${PATCH_TAG:-}" ] || [ -z "${PATCH_SLUG:-}" ]; then
-            echo "::error::PATCH_REPO/PATCH_TAG/PATCH_SLUG not set. Check check-versions matrix output."
-            exit 1
-          fi
-          if [ -z "${CLI_VERSION:-}" ]; then
-            echo "::error::Missing CLI release version."
-            exit 1
-          fi
-
-          MPP_DEST="$TOOLS_DIR/${PATCH_SLUG}.mpp"
-          if [ ! -f "$MPP_DEST" ]; then
-            echo "Downloading patches from ${PATCH_REPO}@${PATCH_TAG}..."
-            gh release download "$PATCH_TAG" \
-              --repo "$PATCH_REPO" \
-              --pattern 'patches-*.mpp' \
-              --dir "$TOOLS_DIR" >/dev/null
-            for f in "$TOOLS_DIR"/patches-*.mpp; do
-              [ -f "$f" ] && mv "$f" "$MPP_DEST"
-              break
-            done
-          fi
-          if [ ! -f "$MPP_DEST" ]; then
-            echo "::error::Failed to obtain ${MPP_DEST} from ${PATCH_REPO}@${PATCH_TAG}."
-            exit 1
-          fi
-          echo "patches_tag=${PATCH_TAG}" >> "$GITHUB_OUTPUT"
-
-          curl -fsSL "https://raw.githubusercontent.com/${PATCH_REPO}/${PATCH_TAG}/patches-list.json" \
-            -o "$TOOLS_DIR/patches-list.json"
-
-          if [ ! -f "$TOOLS_DIR/morphe-cli.jar" ]; then
-            gh release download "$CLI_VERSION" \
-              --repo MorpheApp/morphe-cli \
-              --pattern 'morphe-cli-*-all.jar' \
-              --dir "$TOOLS_DIR" >/dev/null
-          fi
-
-          APKEDITOR_TAG="$(gh release view --repo REAndroid/APKEditor --json tagName -q .tagName)"
-          APKEDITOR_ASSET="$(
-            gh release view "$APKEDITOR_TAG" --repo REAndroid/APKEditor --json assets \
-              -q '.assets[] | select(.name | endswith(".jar")) | .name' \
-              | head -n1
-          )"
-          if [ -z "$APKEDITOR_ASSET" ]; then
-            echo "::error::Could not find APKEditor .jar asset on release ${APKEDITOR_TAG}."
-            exit 1
-          fi
-          gh release download "$APKEDITOR_TAG" \
-            --repo REAndroid/APKEditor \
-            --pattern "$APKEDITOR_ASSET" \
-            --dir "$TOOLS_DIR" >/dev/null
-
-          APKEDITOR_JAR_PATH="$TOOLS_DIR/$APKEDITOR_ASSET"
-          if [ ! -f "$APKEDITOR_JAR_PATH" ]; then
-            echo "::error::APKEditor download failed: $APKEDITOR_JAR_PATH"
-            exit 1
-          fi
-          echo "apkeditor_jar=$APKEDITOR_JAR_PATH" >> "$GITHUB_OUTPUT"
-          echo "Downloaded APKEditor ${APKEDITOR_TAG}: ${APKEDITOR_ASSET}"
+          TOOLS_DIR: ${{ env.TOOLS_DIR }}
+        run: bash scripts/fetch_morphe_tools.sh
 
       - name: Resolve supported version for ${{ matrix.appId }}
         id: targetver
@@ -331,16 +269,9 @@ jobs:
           APP_ID: ${{ matrix.appId }}
           PATCH_REPO: ${{ matrix.patchRepo }}
           TOOLS_DIR: ${{ env.TOOLS_DIR }}
-        run: |
-          set -euo pipefail
-          pin="$(jq -r --arg pkg "$APP_ID" '.patch_repos[$pkg].pin_version // empty' config.json 2>/dev/null || true)"
-          disabled="$(jq -c \
-            --arg repo "$PATCH_REPO" \
-            --arg pkg "$APP_ID" \
-            '.[$repo][$pkg] // {} | to_entries | map(select(.value == false) | .key)' \
-            patches.json 2>/dev/null || echo '[]')"
-          export PINNED_VERSION="$pin" DISABLED_PATCHES_JSON="$disabled"
-          node "$GITHUB_WORKSPACE/.github/scripts/resolve-supported-version.js"
+          PINNED_VERSION: ${{ steps.targetver_prep.outputs.pinned }}
+          DISABLED_PATCHES_JSON: ${{ steps.targetver_prep.outputs.disabled }}
+        run: node "$GITHUB_WORKSPACE/.github/scripts/resolve-supported-version.js"
 
       - name: Cache APK for ${{ matrix.appId }}
         id: cache-apk
