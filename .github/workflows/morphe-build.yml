@@ -286,6 +286,13 @@ jobs:
           TOOLS_DIR: ${{ env.TOOLS_DIR }}
         run: bash scripts/fetch_morphe_tools.sh
 
+      - name: Prepare inputs for resolve + download
+        id: targetver_prep
+        env:
+          APP_ID: ${{ matrix.appId }}
+          PATCH_REPO: ${{ matrix.patchRepo }}
+        run: bash scripts/prepare_target_version.sh
+
       - name: Resolve supported version for ${{ matrix.appId }}
         id: targetver
         env:
@@ -309,13 +316,6 @@ jobs:
         env:
           ANDROID_HOME: /tmp/android-sdk
         run: bash scripts/install_aapt.sh
-
-      - name: Prepare inputs for download-supported-apk.js
-        id: targetver_prep
-        env:
-          APP_ID: ${{ matrix.appId }}
-          PATCH_REPO: ${{ matrix.patchRepo }}
-        run: bash scripts/prepare_target_version.sh
 
       - name: Download supported APK for ${{ matrix.appId }}
         id: getapk
