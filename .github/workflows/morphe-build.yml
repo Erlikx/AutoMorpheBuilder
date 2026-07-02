@@ -384,6 +384,8 @@ jobs:
         env:
           TOOLS_DIR: ${{ env.TOOLS_DIR }}
           MATRIX_NAME: ${{ matrix.name }}
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: bash scripts/prepare_keystore.sh
