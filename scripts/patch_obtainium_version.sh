@@ -26,13 +26,15 @@
 # failures cause the step to fail.
 #
 # Environment:
-#   APK            required  absolute path to the patched APK
+#   APK            required  path to the patched APK (absolute, or
+#                             relative to OUT_DIR if OUT_DIR is set)
 #   APK_VERSION    required  base APK version
 #   PATCH_TAG      required  morphe patch tag (e.g. v1.32.0)
 #   KEYSTORE_FILE  required  PKCS12 keystore for apksigner
 #   KEY_ALIAS      required  key alias
 #   KEYSTORE_PASSWORD required  keystore password
 #   KEY_PASSWORD   optional  key password (defaults to KEYSTORE_PASSWORD)
+#   OUT_DIR        optional  base dir for relative APK paths (default .)
 #   RUNNER_TEMP    optional  default /tmp
 
 set -Eeuo pipefail
@@ -47,6 +49,7 @@ KEYSTORE_FILE="${KEYSTORE_FILE:-}"
 KEY_ALIAS="${KEY_ALIAS:-}"
 KEYSTORE_PASSWORD="${KEYSTORE_PASSWORD:-}"
 KEY_PASSWORD="${KEY_PASSWORD:-$KEYSTORE_PASSWORD}"
+OUT_DIR="${OUT_DIR:-.}"
 RUNNER_TEMP="${RUNNER_TEMP:-/tmp}"
 
 for var in APK APK_VERSION PATCH_TAG KEYSTORE_FILE KEY_ALIAS KEYSTORE_PASSWORD; do
@@ -55,6 +58,14 @@ for var in APK APK_VERSION PATCH_TAG KEYSTORE_FILE KEY_ALIAS KEYSTORE_PASSWORD; 
     exit 1
   fi
 done
+
+# Resolve relative APK paths against OUT_DIR — the patch step writes
+# just the basename to GITHUB_OUTPUT, so the workflow passes
+# "<out_dir>/<filename>". If the file isn't there we fall back to
+# using the path as-is (e.g. an absolute path from a different driver).
+if [ ! -f "$APK" ] && [ -f "$OUT_DIR/$APK" ]; then
+  APK="$OUT_DIR/$APK"
+fi
 
 require_command aapt
 require_command zipalign

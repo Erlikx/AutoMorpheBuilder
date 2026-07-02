@@ -45,6 +45,18 @@ jobs:
         if: steps.check.outputs.should-build == 'true'
         run: npm ci
 
+      - name: Upload node_modules for build jobs
+        # Avoids re-running npm ci in each build matrix entry. The
+        # lockfile content is identical for every matrix entry so this
+        # is a safe shortcut.
+        if: steps.check.outputs.should-build == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: node-modules
+          path: node_modules
+          retention-days: 1
+          if-no-files-found: error
+
       - name: Cache Playwright browsers
         if: steps.check.outputs.should-build == 'true'
         uses: actions/cache@v5
@@ -221,8 +233,19 @@ jobs:
         with:
           node-version: '24'
 
-      - name: Install Node dependencies
-        run: npm ci
+      - name: Restore node_modules from check-versions
+        uses: actions/download-artifact@v8
+        with:
+          name: node-modules
+          path: node_modules
+        continue-on-error: true
+
+      - name: Install Node dependencies (fallback if restore failed)
+        run: |
+          if [ ! -d node_modules ] || [ ! -d node_modules/playwright ]; then
+            echo "::warning::node_modules restore failed; running npm ci as fallback"
+            npm ci
+          fi
 
       - name: Install Playwright browsers (fallback if missing)
         env:
@@ -351,17 +374,9 @@ jobs:
           KEY_ALIAS: ${{ steps.keystore.outputs.alias }}
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          OUT_DIR: ${{ env.OUT_DIR }}
           RUNNER_TEMP: ${{ runner.temp }}
-        run: |
-          # patch_obtainium_version.sh operates on an absolute path to
-          # the APK inside OUT_DIR. The patch step wrote just the bare
-          # filename to GITHUB_OUTPUT, so resolve it here.
-          apk="$OUT_DIR/${{ steps.patch.outputs.output }}"
-          if [ ! -f "$apk" ]; then
-            # Best-effort: some workflows emit an absolute path.
-            apk="${{ steps.patch.outputs.output }}"
-          fi
-          APK="$apk" bash scripts/patch_obtainium_version.sh
+        run: bash scripts/patch_obtainium_version.sh
 
       - name: Upload patched ${{ matrix.name }}
         uses: actions/upload-artifact@v7
