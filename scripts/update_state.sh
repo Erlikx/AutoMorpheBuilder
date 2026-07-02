@@ -35,7 +35,8 @@ set -Eeuo pipefail
 . "$(dirname "$0")/lib/json.sh"
 . "$(dirname "$0")/lib/config.sh"
 
-REPO_VERSIONS="${REPO_VERSIONS:-{}}"
+_default_repo_versions='{}'
+REPO_VERSIONS="${REPO_VERSIONS:-$_default_repo_versions}"
 CLI_VERSION="${CLI_VERSION:-}"
 CLI_BRANCH="${CLI_BRANCH:-main}"
 

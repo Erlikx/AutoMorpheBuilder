@@ -40,7 +40,8 @@ set -Eeuo pipefail
 TOOLS_DIR="${TOOLS_DIR:-./tools}"
 APK_DIR="${APK_DIR:-${TOOLS_DIR}/apks}"
 RESULTS_DIR="${RESULTS_DIR:-${RUNNER_TEMP:-/tmp}/download_results}"
-REPO_VERSIONS="${REPO_VERSIONS:-{}}"
+_default_repo_versions='{}'
+REPO_VERSIONS="${REPO_VERSIONS:-$_default_repo_versions}"
 
 mkdir -p "$APK_DIR" "$RESULTS_DIR"
 
