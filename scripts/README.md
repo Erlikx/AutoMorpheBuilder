@@ -23,6 +23,7 @@ scripts/
 ├── install_bouncycastle.sh   download BouncyCastle provider jar
 ├── install_playwright.sh     install Playwright Chromium + smoke test
 ├── download_morphe_tools.sh  download morphe-cli.jar + per-repo .mpp
+├── fetch_morphe_tools.sh     per-matrix mpp / cli / APKEditor download
 ├── pre_download_apks.sh      parallel pre-download APKs across all apps
 ├── prepare_target_version.sh gather inputs for download-supported-apk.js
 ├── prepare_keystore.sh       decode KEYSTORE_BASE64; produce BKS + PKCS12 keystores
