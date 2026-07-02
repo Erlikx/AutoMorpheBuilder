@@ -70,7 +70,8 @@ fi
 
 # --- patches .mpp files ---------------------------------------------------
 
-while IFS='|' read -r repo branch; do
+while IFS='|' read -r repo _; do
+  # branch is unused here; we already have the tag in REPO_VERSIONS.
   slug="$(repo_slug "$repo")"
   tag="$(jq -r --arg r "$repo" '.[$r] // empty' <<<"$REPO_VERSIONS")"
   if [ -z "$tag" ]; then

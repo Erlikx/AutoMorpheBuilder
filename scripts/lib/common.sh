@@ -111,14 +111,3 @@ capture() {
   out="$("$@")"
   printf '%s' "$out"
 }
-
-# --- gh helpers (re-exported from lib/github.sh) ---------------------------
-# Filled in by sourcing lib/github.sh. Stub here so common.sh is enough on
-# its own for scripts that don't touch the GitHub API.
-
-gh_release_tag()    { :; }
-gh_release_view()   { :; }
-gh_release_download(){ :; }
-gh_release_create() { :; }
-gh_release_upload() { :; }
-gh_release_edit()   { :; }
