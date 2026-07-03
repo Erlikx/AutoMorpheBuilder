@@ -1,8 +1,10 @@
 # Setup Guide
 
-Quick setup for signed Morphe builds and Obtainium-ready releases.
+**Quick setup** for signed Morphe builds with Obtainium-ready releases.
 
-## 1. Create A Signing Keystore
+---
+
+## 🔐 Step 1: Create Signing Keystore
 
 ```bash
 keytool -genkey -v -keystore morphe.jks \
@@ -11,45 +13,49 @@ keytool -genkey -v -keystore morphe.jks \
   -dname "CN=Your Name, O=Your Org, L=City, ST=State, C=US"
 ```
 
-Keep this file safe. Do not commit it.
+> ⚠️ **IMPORTANT**: Keep this file safe! **Do not commit it.**
 
-## 2. Base64 Encode The Keystore
+---
 
+## 📤 Step 2: Base64 Encode Keystore
+
+### Linux/macOS
 ```bash
-# Linux/macOS
 base64 -w 0 morphe.jks > morphe.jks.b64
 cat morphe.jks.b64
 ```
 
+### Windows PowerShell
 ```powershell
-# Windows PowerShell
 [Convert]::ToBase64String([System.IO.File]::ReadAllBytes("morphe.jks"))
 ```
 
-## 3. Add GitHub Actions Secrets
+Copy the output - you'll need it for GitHub Secrets.
 
-Repository → `Settings` → `Secrets and variables` → `Actions`
+---
 
-Add:
+## 🔑 Step 3: Add GitHub Actions Secrets
 
-- `KEYSTORE_BASE64` (required)
-- `KEYSTORE_PASSWORD` (required)
-- `KEY_ALIAS` (optional, defaults to first alias found)
-- `KEY_PASSWORD` (optional, only if key password differs)
-- `APKMIRROR_API_USER` (optional; improves APK resolution speed when set)
-- `APKMIRROR_API_PASS` (optional; required alongside `APKMIRROR_API_USER`)
+**Path:** Repository → Settings → Secrets and variables → Actions
 
-Signed builds are enforced. Missing required signing secrets will fail the run.
+| Secret | Required | Description |
+|--------|----------|-------------|
+| `KEYSTORE_BASE64` | ✅ Yes | Paste your base64 from Step 2 |
+| `KEYSTORE_PASSWORD` | ✅ Yes | Your keystore password |
+| `KEY_ALIAS` | ❌ No | Optional: specific alias (defaults to first) |
+| `KEY_PASSWORD` | ❌ No | Optional: if key password ≠ keystore password |
+| `APKMIRROR_API_USER` | ❌ No | Optional: APKMirror-API username |
+| `APKMIRROR_API_PASS` | ❌ No | Optional: APKMirror-API password |
 
-The APKMirror-API credentials are optional. When unset, the APK
-downloader's APKMirror-API path is skipped and the build falls through
-to the apkeep (APKPure) → APKMirror-scraper (Playwright) fallback chain.
-When set, APKMirror-API is tried in parallel with apkeep and usually
-wins, which avoids the slower Playwright session in most runs.
+> 💡 **Pro Tip**: APKMirror-API credentials make APK resolution **much faster** (avoids slow Playwright fallback).
 
-## 4. Configure `config.json`
+> ⚠️ **Warning**: Signed builds are **enforced**. Missing required secrets = build fails.
 
-Edit `config.json` to set build options:
+---
+
+## ⚙️ Step 4: Configure `config.json`
+
+Edit `config.json` with your build options:
 
 ```json
 {
@@ -82,18 +88,27 @@ Edit `config.json` to set build options:
 }
 ```
 
+### Configuration Options
+
 | Field | Default | Description |
 |-------|---------|-------------|
-| `preferred_arch` | `arm64-v8a` | CPU architecture to prefer when selecting APK variant |
-| `auto_update_urls` | `true` | Auto-update download URLs after each successful build |
-| `patch_repos` | — | Per-app config: `name`, `repo`, `branch`, `apkmirror_path` (APKMirror URL slug), and optional `pin_version` to lock a specific APK version |
-| `cli` | — | morphe-cli repo and branch (`main` or `dev`) |
+| `preferred_arch` | `arm64-v8a` | CPU architecture to prefer |
+| `auto_update_urls` | `true` | Auto-update download URLs after builds |
+| `patch_repos[*].name` | - | App identifier (e.g., `youtube`) |
+| `patch_repos[*].repo` | - | Patch repository |
+| `patch_repos[*].branch` | - | Patch branch |
+| `patch_repos[*].apkmirror_path` | - | APKMirror URL slug |
+| `patch_repos[*].pin_version` | - | Optional: lock to specific version |
+| `cli.repo` | - | morphe-cli repository |
+| `cli.branch` | - | morphe-cli branch (`main` or `dev`) |
 
-The `download_urls` field is managed automatically by the workflow after each successful build. You don't need to set it manually.
+> 📝 **Note**: `download_urls` is auto-managed - don't set it manually.
 
-## 5. Configure `patches.json`
+---
 
-Edit `patches.json` to choose which patches to enable or disable. The workflow is repo-keyed — run `update-patches.yml` first to populate it, then edit:
+## 🎛️ Step 5: Configure `patches.json`
+
+First, run the `update-patches.yml` workflow to populate the file, then edit it:
 
 ```json
 {
@@ -113,77 +128,135 @@ Edit `patches.json` to choose which patches to enable or disable. The workflow i
 }
 ```
 
-- `true` = enable patch, `false` = disable patch
-- The workflow auto-adds any new upstream patches (defaulting to `true`)
-- Your existing `true`/`false` values are never overwritten
+### How It Works
 
-Build logs show which patches were enabled and disabled per app.
+- ✅ `true` = **enable** patch
+- ❌ `false` = **disable** patch
+- 🔄 Workflow **auto-adds** new upstream patches (default: `true`)
+- 💾 Your existing `true`/`false` values are **never overwritten**
+- 📋 Build logs show which patches were enabled/disabled per app
 
-## 6. Run The Workflow
+---
 
-- **Manual:** `Actions` → `Build Morphe-patched apps` → `Run workflow`
-- **Automatic:** scheduled daily at `05:15 UTC`
+## ▶️ Step 6: Run the Workflow
 
-The build only runs when Morphe patch or CLI versions have changed since the last build.
+### Manual Trigger
+1. Go to **Actions** tab
+2. Select **Build Morphe-patched apps**
+3. Click **Run workflow**
 
-## 7. Download Outputs
+### Automatic Schedule
+- Runs daily at **05:15 UTC**
+- Only builds when Morphe patch or CLI versions changed
 
-You get per-app GitHub Releases (one per app):
+---
 
-- `youtube-v<base>-<patches>` → `youtube-v20.44.38-v1.24.0-dev.8.apk`
-- `ytmusic-v<base>-<patches>` → `ytmusic-v8.44.54-v1.24.0-dev.8.apk`
-- `reddit-v<base>-<patches>` → `reddit-v2025.02.17-v1.24.0-dev.8.apk`
+## 📥 Step 7: Download Outputs
 
-Also available as GitHub Actions artifacts.
+### GitHub Releases (Recommended)
+Each app gets its own release:
 
-## 8. Add To Obtainium
+| App | Release Name | APK File |
+|-----|--------------|----------|
+| YouTube | `youtube-v<base>-<patches>` | `youtube-v20.44.38-v1.24.0-dev.8.apk` |
+| YouTube Music | `ytmusic-v<base>-<patches>` | `ytmusic-v8.44.54-v1.24.0-dev.8.apk` |
+| Reddit | `reddit-v<base>-<patches>` | `reddit-v2025.02.17-v1.24.0-dev.8.apk` |
 
-Create 3 separate Obtainium entries (same repo URL, different filter per app).
+### GitHub Actions Artifacts
+Same files available as workflow artifacts.
 
-For each entry:
+---
 
-1. Source: `GitHub`
-2. Repository URL: `https://github.com/<your-user>/<your-repo>`
-3. Filter (regex):
+## 📱 Step 8: Add to Obtainium
+
+Create **3 separate entries** (same repo, different filters per app).
+
+### For Each App:
+
+1. **Source**: Select `GitHub`
+2. **Repository URL**: `https://github.com/<your-user>/<your-repo>`
+3. **Release Tag Filter** (regex):
+   - YouTube: `^youtube`
+   - YouTube Music: `^ytmusic`
+   - Reddit: `^reddit`
+4. **APK Filter** (regex):
    - YouTube: `^youtube-v.*\.apk$`
    - YouTube Music: `^ytmusic-v.*\.apk$`
    - Reddit: `^reddit-v.*\.apk$`
 
-## Notes On APK Download
+> ⚠️ **Important**: Both filters are **required** for each entry!
 
-The workflow downloads APKs using a multi-source fallback chain (first valid result wins):
+---
 
-1. **Pre-downloaded APKs** — from `check-versions` job output
-2. **URL cache** — `~/.cache/auto-morphe-builder/urls/` for previously resolved direct download URLs
-3. **config.json URLs** — version-specific URLs saved by the `update-download-urls` job
-4. **apkeep (APKPure)** — tried in parallel
-5. **APKMirror API** — tried in parallel
-6. **APKMirror scraper** — 3-page navigation using curl; falls back to Playwright (Chromium) if Cloudflare blocks curl
+## 📥 APK Download Flow (Advanced)
 
-The APKMirror scraper navigates release page → variant page → download page within the same browser session, preserving session cookies needed for the final download.
+The workflow uses a multi-source fallback chain:
 
-## Notes On APK Selection
+1. **Pre-downloaded APKs** - from `check-versions` job output in `tools/`
+2. **URL cache** - `~/.cache/auto-morphe-builder/urls/` for previously resolved URLs
+3. **config.json URLs** - version-specific URLs saved by workflow
+4. **Parallel resolution** - tries these simultaneously:
+   - apkeep (APKPure)
+   - APKMirror API (if credentials set)
+   - APKMirror scraper (curl → Playwright fallback)
 
-- Architecture is configured via `preferred_arch` in `config.json` (default: `arm64-v8a`)
-- DPI preference: `nodpi` → `120-640dpi` → `240-480dpi`
-- APK types: prefers `APK` over `BUNDLE` for same arch/DPI
-- For `.xapk`/`.apkm`/`.apks`, APKEditor merge produces a normal `.apk` before patching
+**APKMirror Scraper Details:**
+- Navigates: release page → variant page → download page
+- Uses same browser session to preserve cookies
+- Falls back to Playwright if Cloudflare blocks curl
 
-## Common Failures
+---
 
-### APK download fails / `No APK could be downloaded`
+## 🎯 APK Selection (Advanced)
 
-The download chain exhausted all sources. Check:
+| Criteria | Priority |
+|----------|----------|
+| Architecture | `preferred_arch` from config (default: `arm64-v8a`) |
+| DPI | `nodpi` → `120-640dpi` → `240-480dpi` |
+| APK Type | `APK` preferred over `BUNDLE` for same arch/DPI |
+| Split Packages | APKEditor merge → dex-bearing APK extraction |
+| Validation | **Rejects** dex-less APKs (requires `classes*.dex`) |
 
-- The `apkmirror_path` values in `config.json` `patch_repos` are correct for each app
-- Run the workflow again (transient Cloudflare blocks are common)
+---
 
-### `Chosen APK has no classes.dex`
+## ❌ Common Issues & Fixes
 
-The downloaded file is a split config APK, not the base APK. The scraper selects variants using the priority list but some releases only have BUNDLE variants. Check APKMirror manually to confirm an APK variant exists for the target version.
+### ❌ APK download fails / `No APK could be downloaded`
+**Check:**
+- [ ] `apkmirror_path` values in `config.json` are correct
+- [ ] Retry workflow (Cloudflare blocks are often transient)
+- [ ] Consider adding APKMirror-API credentials
 
-### `Wrong version of key store`
+### ❌ `Chosen APK has no classes.dex`
+**Solution:**
+- The selected file is a split config APK, not the base APK
+- Check APKMirror manually to confirm an APK variant exists
+- The scraper uses priority list but some releases only have BUNDLE variants
 
-- Verify `KEYSTORE_BASE64` decodes to your actual keystore
-- Verify `KEYSTORE_PASSWORD` is correct
-- Set `KEY_PASSWORD` if the key password differs from the keystore password
+### ❌ `Wrong version of key store`
+**Verify:**
+1. `KEYSTORE_BASE64` decodes to your **actual** keystore file
+2. `KEYSTORE_PASSWORD` is **correct**
+3. `KEY_PASSWORD` is set if key password **differs** from keystore password
+
+---
+
+## ✅ Setup Checklist
+
+- [ ] Created signing keystore
+- [ ] Base64 encoded keystore
+- [ ] Added GitHub Secrets (`KEYSTORE_BASE64`, `KEYSTORE_PASSWORD`)
+- [ ] Configured `config.json`
+- [ ] Ran `update-patches.yml` workflow
+- [ ] Configured `patches.json`
+- [ ] Ran first build manually
+- [ ] Verified releases created
+- [ ] Set up Obtainium entries
+
+---
+
+## 📚 Learn More
+
+- [README.md](README.md) - Full project documentation
+- [Morphe patches](https://github.com/MorpheApp/morphe-patches)
+- [morphe-cli](https://github.com/MorpheApp/morphe-cli)
