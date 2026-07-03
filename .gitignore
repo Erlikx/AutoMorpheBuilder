@@ -25,6 +25,7 @@ out/
 .idea/
 .vscode/
 *.iml
+eslint*
 
 # macOS
 .DS_Store
