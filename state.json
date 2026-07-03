@@ -2,7 +2,7 @@
   "patches": {
     "MorpheApp/morphe-patches": {
       "branch": "main",
-      "version": "v1.32.0"
+      "version": "v1.33.0"
     }
   },
   "cli_branch": "main",
