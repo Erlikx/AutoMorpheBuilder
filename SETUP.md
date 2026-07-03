@@ -2,7 +2,7 @@
 
 **Quick setup** for signed Morphe builds with Obtainium-ready releases.
 
-> 🌟 **Forking this repo and customizing it for your own needs is encouraged!** Feel free to modify the workflow, add more apps, or adjust patches.
+🌟 **Forking this repo and customizing it for your own needs is encouraged!** Feel free to modify the workflow, add more apps, or adjust patches.
 
 ---
 
