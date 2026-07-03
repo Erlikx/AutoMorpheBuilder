@@ -9,179 +9,56 @@ permissions:
   contents: write
   actions: read
 
+# Allow only one in-flight build for this workflow. Concurrent runs would
+# race on state.json + download_urls; this lets the runner cancel the
+# older one instead of producing a corrupt commit.
+concurrency:
+  group: morphe-build
+  cancel-in-progress: false
+
 jobs:
   check-versions:
     runs-on: ubuntu-latest
     outputs:
-      should-build: ${{ steps.version-check.outputs.should-build }}
-      matrix-include: ${{ steps.version-check.outputs.matrix-include }}
-      repo-versions: ${{ steps.version-check.outputs.repo-versions }}
-      cli-version: ${{ steps.version-check.outputs.cli-version }}
-      cli-branch: ${{ steps.version-check.outputs.cli-branch }}
+      should-build: ${{ steps.check.outputs.should-build }}
+      matrix-include: ${{ steps.check.outputs.matrix-include }}
+      repo-versions: ${{ steps.check.outputs.repo-versions }}
+      cli-version: ${{ steps.check.outputs.cli-version }}
+      cli-branch: ${{ steps.check.outputs.cli-branch }}
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Check latest versions
-        id: version-check
-        run: |
-          set -euo pipefail
-
-          # Validate required config keys.
-          if ! jq -e '.patch_repos | type == "object" and length > 0' config.json >/dev/null 2>&1; then
-            echo "::error::config.json is missing 'patch_repos' or it is empty. Add per-app repo assignments."
-            exit 1
-          fi
-          if ! jq -e '.cli | has("repo") and has("branch")' config.json >/dev/null 2>&1; then
-            echo "::error::config.json is missing 'cli.repo' or 'cli.branch'."
-            exit 1
-          fi
-
-          CLI_REPO="$(jq -r '.cli.repo' config.json)"
-          CLI_BRANCH="$(jq -r '.cli.branch | ascii_downcase' config.json)"
-          if [ "$CLI_BRANCH" != "main" ] && [ "$CLI_BRANCH" != "dev" ]; then
-            echo "::warning::Invalid cli.branch '$CLI_BRANCH'. Falling back to 'main'."
-            CLI_BRANCH="main"
-          fi
-
-          # Build list of unique patch repo+branch pairs
-          REPO_PAIRS="$(jq -r '
-            .patch_repos
-            | to_entries
-            | map(.value | "\(.repo)|\(.branch | ascii_downcase)")
-            | unique[]
-          ' config.json)"
-
-          if [ -z "$REPO_PAIRS" ]; then
-            echo "::error::No valid patch_repos entries found in config.json."
-            exit 1
-          fi
-
-          source "$GITHUB_WORKSPACE/.github/scripts/resolve-tag.sh"
-
-          # Resolve tag for each unique patch repo+branch pair
-          declare -A REPO_TAGS
-          while IFS='|' read -r repo branch; do
-            echo "Resolving tag for ${repo} (branch=${branch})..."
-            tag="$(resolve_release_tag "$repo" "$branch")"
-            echo "  ${repo} -> ${tag}"
-            REPO_TAGS["$repo"]="$tag"
-          done <<< "$REPO_PAIRS"
-
-          # Resolve CLI tag
-          CLI_TAG="$(resolve_release_tag "$CLI_REPO" "$CLI_BRANCH")"
-          echo "CLI (${CLI_REPO}) -> ${CLI_TAG}"
-
-          # Build matrix-include JSON array
-          MATRIX_INCLUDE="$(jq -c '
-            .patch_repos
-            | to_entries
-            | map({
-                name: .value.name,
-                appId: .key,
-                patchRepo: .value.repo,
-                patchBranch: (.value.branch | ascii_downcase),
-                patchSlug: (.value.repo | gsub("/"; "-"))
-              })
-          ' config.json)"
-
-          # Inject resolved tags into matrix entries
-          MATRIX_WITH_TAGS="$(
-            echo "$MATRIX_INCLUDE" | jq -c \
-              --argjson tags "$(
-                for repo in "${!REPO_TAGS[@]}"; do
-                  echo "{\"repo\":\"$repo\",\"tag\":\"${REPO_TAGS[$repo]}\"}"
-                done | jq -sc 'map({(.repo): .tag}) | add // {}'
-              )" '
-              map(. + {patchTag: ($tags[.patchRepo] // "")})
-            '
-          )"
-
-          # Guard: if matrix is empty (no apps configured), skip build
-          if [ "$(echo "$MATRIX_WITH_TAGS" | jq 'length')" = "0" ]; then
-            echo "::warning::No apps configured in patch_repos; skipping build."
-            echo "should-build=false" >> "$GITHUB_OUTPUT"
-            echo "matrix-include=[]" >> "$GITHUB_OUTPUT"
-            echo "repo-versions={}" >> "$GITHUB_OUTPUT"
-            echo "cli-version=$CLI_TAG" >> "$GITHUB_OUTPUT"
-            echo "cli-branch=$CLI_BRANCH" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          # Build repo-versions map (for state comparison and update-state)
-          REPO_VERSIONS="$(
-            for repo in "${!REPO_TAGS[@]}"; do
-              echo "{\"repo\":\"$repo\",\"tag\":\"${REPO_TAGS[$repo]}\"}"
-            done | jq -sc 'map({(.repo): .tag}) | add // {}'
-          )"
-
-          echo "matrix-include=$MATRIX_WITH_TAGS" >> "$GITHUB_OUTPUT"
-          echo "repo-versions=$REPO_VERSIONS" >> "$GITHUB_OUTPUT"
-          echo "cli-version=$CLI_TAG" >> "$GITHUB_OUTPUT"
-          echo "cli-branch=$CLI_BRANCH" >> "$GITHUB_OUTPUT"
-
-          # Load previous state — read new patches map; fall back to old flat keys for migration.
-          PREV_REPO_VERSIONS="{}"
-          PREV_CLI_VERSION="none"
-          PREV_CLI_BRANCH_STATE="main"
-          if [ -s state.json ] && jq -e 'type=="object"' state.json >/dev/null 2>&1; then
-            PREV_CLI_VERSION="$(jq -r '.cli_version // "none"' state.json)"
-            PREV_CLI_BRANCH_STATE="$(jq -r '.cli_branch // "main"' state.json)"
-            if jq -e '.patches | type == "object"' state.json >/dev/null 2>&1; then
-              # New repo-keyed structure
-              PREV_REPO_VERSIONS="$(jq -c '.patches | map_values(.version)' state.json)"
-            else
-              # Old flat structure (pre-migration): treat as unknown versions
-              echo "state.json uses old flat structure; treating patch versions as unknown (will trigger build)."
-              PREV_REPO_VERSIONS="{}"
-            fi
-          else
-            if [ -f state.json ]; then
-              echo "state.json is missing or invalid JSON; using defaults."
-            fi
-          fi
-
-          # Check if any repo version changed
-          VERSION_CHANGED=false
-          for repo in "${!REPO_TAGS[@]}"; do
-            CURRENT_TAG="${REPO_TAGS[$repo]}"
-            PREV_TAG="$(echo "$PREV_REPO_VERSIONS" | jq -r --arg r "$repo" '.[$r] // "none"')"
-            if [ "$CURRENT_TAG" != "$PREV_TAG" ]; then
-              echo "::notice::Patch version changed: ${repo}: ${PREV_TAG} -> ${CURRENT_TAG}"
-              VERSION_CHANGED=true
-            fi
-          done
-
-          if [ "$CLI_TAG" != "$PREV_CLI_VERSION" ] || [ "$CLI_BRANCH" != "$PREV_CLI_BRANCH_STATE" ]; then
-            echo "::notice::CLI version changed: ${PREV_CLI_BRANCH_STATE}/${PREV_CLI_VERSION} -> ${CLI_BRANCH}/${CLI_TAG}"
-            VERSION_CHANGED=true
-          fi
-
-          # Check if versions/channels changed
-          if [ "${GITHUB_EVENT_NAME:-}" = "workflow_dispatch" ]; then
-            echo "should-build=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::Manual run detected; forcing build."
-          elif [ "$VERSION_CHANGED" = "true" ]; then
-            echo "should-build=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "should-build=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::No version/channel changes detected. Skipping build."
-          fi
+      - name: Resolve latest Morphe + CLI versions
+        id: check
+        run: bash scripts/check_versions.sh
 
       - name: Setup Node.js
-        if: steps.version-check.outputs.should-build == 'true'
+        if: steps.check.outputs.should-build == 'true'
         uses: actions/setup-node@v6
         with:
           node-version: '24'
 
       - name: Install dependencies
-        if: steps.version-check.outputs.should-build == 'true'
+        if: steps.check.outputs.should-build == 'true'
         run: npm ci
 
+      - name: Upload node_modules for build jobs
+        # Avoids re-running npm ci in each build matrix entry. The
+        # lockfile content is identical for every matrix entry so this
+        # is a safe shortcut.
+        if: steps.check.outputs.should-build == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: node-modules
+          path: node_modules
+          retention-days: 1
+          if-no-files-found: error
+
       - name: Cache Playwright browsers
-        if: steps.version-check.outputs.should-build == 'true'
+        if: steps.check.outputs.should-build == 'true'
         uses: actions/cache@v5
         with:
           path: ~/.cache/ms-playwright
@@ -190,55 +67,13 @@ jobs:
             playwright-${{ runner.os }}-chromium-
 
       - name: Install Playwright browsers
-        if: steps.version-check.outputs.should-build == 'true'
-        continue-on-error: true
+        if: steps.check.outputs.should-build == 'true'
         env:
-          # Force Playwright to use the public GCS bucket (its cdn.playwright.dev
-          # redirector has been unreliable on these runners; the bucket
-          # itself is fast and reachable). Playwright's URL template
-          # includes a `builds/cft/` prefix that the GCS bucket does NOT
-          # have — patch-playwright-cft-path.js strips that prefix at
-          # module-resolution time so the URL matches the bucket layout.
-          #
-          # `npx playwright install` on Playwright 1.58.x is unusable here:
-          # its yauzl-based extraction hangs after ~7 entries and the
-          # 5-min timeout kills it, leaving a half-installed browser. The
-          # install-playwright-browsers.js script does the same job with
-          # curl + system unzip, which finishes in ~15s and produces a
-          # browser Playwright actually accepts.
           PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST: https://storage.googleapis.com/chrome-for-testing-public
-        run: |
-          set -euo pipefail
-          echo "Installing Playwright Chromium (best-effort)..."
-          # 5 min ceiling — fail fast instead of hanging the workflow.
-          NODE_OPTIONS="--require=$GITHUB_WORKSPACE/.github/scripts/patch-playwright-cft-path.js" \
-            timeout 300 node "$GITHUB_WORKSPACE/.github/scripts/install-playwright-browsers.js" || \
-            echo "::warning::playwright install failed; APKMirror Playwright fallback will be unavailable, but apkeep / apkmirror-api will still work"
-
-      - name: Smoke-test Playwright Chromium
-        if: steps.version-check.outputs.should-build == 'true'
-        continue-on-error: true
-        run: |
-          set -euo pipefail
-          # Best-effort smoke test. If launch fails, the build will still
-          # work via the apkeep / apkmirror-api resolution paths.
-          node -e '
-            const { chromium } = require("playwright");
-            (async () => {
-              const t0 = Date.now();
-              const browser = await chromium.launch({
-                headless: true,
-                args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
-              });
-              const page = await browser.newPage();
-              const ua = await page.evaluate(() => navigator.userAgent);
-              console.log("Chromium launched OK in", Date.now() - t0, "ms, UA:", ua);
-              await browser.close();
-            })().catch((e) => { console.error("Chromium smoke-test FAILED:", e.message); process.exit(1); });
-          '
+        run: bash scripts/install_playwright.sh
 
       - name: Upload Playwright browsers for build jobs
-        if: steps.version-check.outputs.should-build == 'true'
+        if: steps.check.outputs.should-build == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: playwright-browsers
@@ -247,191 +82,63 @@ jobs:
 
       - name: Cache apkeep
         id: cache-apkeep
-        if: steps.version-check.outputs.should-build == 'true'
+        if: steps.check.outputs.should-build == 'true'
         uses: actions/cache@v5
         with:
           path: /usr/local/bin/apkeep
           key: apkeep-${{ runner.os }}-v1
 
       - name: Install apkeep
-        if: steps.version-check.outputs.should-build == 'true'
-        run: |
-          # Install apkeep for downloading APKs from APKPure
-          APKEEP_VERSION="0.18.0"
-          APKEEP_URL="https://github.com/EFForg/apkeep/releases/download/${APKEEP_VERSION}/apkeep-x86_64-unknown-linux-gnu"
-          curl -sSL "$APKEEP_URL" -o /usr/local/bin/apkeep
-          chmod +x /usr/local/bin/apkeep
-          apkeep --version
+        if: steps.check.outputs.should-build == 'true'
+        run: bash scripts/install_apkeep.sh
 
       - name: Upload apkeep for build jobs
-        if: steps.version-check.outputs.should-build == 'true'
+        if: steps.check.outputs.should-build == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: apkeep-binary
           path: /usr/local/bin/apkeep
           retention-days: 1
 
-      - name: Resolve latest APK versions from APKMirror
-        if: steps.version-check.outputs.should-build == 'true'
-        run: |
-          set -euo pipefail
-
-          CLI_TAG="${{ steps.version-check.outputs.cli-version }}"
-          CLI_REPO="$(jq -r '.cli.repo' config.json)"
-          REPO_VERSIONS='${{ steps.version-check.outputs.repo-versions }}'
-
-          mkdir -p tools
-
-          echo "Downloading morphe-cli ${CLI_TAG}..."
-          gh release download "$CLI_TAG" --repo "$CLI_REPO" --pattern "*.jar" --clobber || true
-          for f in *.jar; do
-            [ -f "$f" ] && mv "$f" tools/morphe-cli.jar && echo "Moved $f to tools/morphe-cli.jar"
-          done
-
-          # Download .mpp for each unique patch repo (slug-named)
-          REPO_PAIRS="$(jq -r '
-            .patch_repos
-            | to_entries
-            | map(.value | "\(.repo)|\(.branch | ascii_downcase)")
-            | unique[]
-          ' config.json)"
-
-          while IFS='|' read -r repo branch; do
-            slug="${repo//\//-}"
-            tag="$(echo "$REPO_VERSIONS" | jq -r --arg r "$repo" '.[$r] // empty')"
-            if [ -z "$tag" ]; then
-              echo "::error::No resolved tag for repo ${repo}. Cannot download .mpp."
-              exit 1
-            fi
-            mpp_dest="tools/${slug}.mpp"
-            if [ ! -f "$mpp_dest" ]; then
-              echo "Downloading patches .mpp from ${repo}@${tag}..."
-              gh release download "$tag" --repo "$repo" --pattern "patches-*.mpp" --dir tools >/dev/null
-              # Rename the downloaded .mpp to slug-named file
-              for f in tools/patches-*.mpp; do
-                [ -f "$f" ] && mv "$f" "$mpp_dest" && echo "Saved as ${mpp_dest}"
-                break
-              done
-            else
-              echo "Using existing ${mpp_dest}"
-            fi
-          done <<< "$REPO_PAIRS"
-
-          if [ ! -f tools/morphe-cli.jar ]; then
-            echo "morphe-cli.jar not found; skipping APK version resolution."
-            exit 0
-          fi
+      - name: Download morphe-cli + patches .mpp
+        id: tools
+        if: steps.check.outputs.should-build == 'true'
+        env:
+          CLI_REPO: MorpheApp/morphe-cli
+          CLI_TAG: ${{ steps.check.outputs.cli-version }}
+          REPO_VERSIONS: ${{ steps.check.outputs.repo-versions }}
+        run: bash scripts/download_morphe_tools.sh
 
       - name: Cache morphe-cli and patches
-        if: steps.version-check.outputs.should-build == 'true'
+        if: steps.check.outputs.should-build == 'true'
         uses: actions/cache@v5
         with:
           path: |
             tools/morphe-cli.jar
             tools/*.mpp
-          key: morphe-tools-cli-${{ steps.version-check.outputs.cli-version }}-repos-${{ hashFiles('config.json') }}
+          key: morphe-tools-cli-${{ steps.check.outputs.cli-version }}-repos-${{ hashFiles('config.json') }}
           restore-keys: |
-            morphe-tools-cli-${{ steps.version-check.outputs.cli-version }}-
+            morphe-tools-cli-${{ steps.check.outputs.cli-version }}-
             morphe-tools-
 
       - name: Install aapt for APK version validation
-        if: steps.version-check.outputs.should-build == 'true'
+        id: aapt
+        if: steps.check.outputs.should-build == 'true'
         env:
           ANDROID_HOME: /tmp/android-sdk
-        run: |
-          set -euo pipefail
-          echo "Ensuring aapt is available for the unified-downloader..."
-          # install-aapt.js prints `ANDROID_BUILD_TOOLS_VERSION=<v>` on stdout
-          # (logs go to stderr). `$GITHUB_ENV` only takes effect for the
-          # NEXT step, not this one, so we read it back via command
-          # substitution here. The same value is also written to $GITHUB_ENV
-          # for subsequent steps to consume via ${{ env.* }}.
-          BT_VERSION="$(node "$GITHUB_WORKSPACE/.github/scripts/install-aapt.js" \
-            | grep '^ANDROID_BUILD_TOOLS_VERSION=' | cut -d= -f2)"
-          BT_DIR="$ANDROID_HOME/build-tools/${BT_VERSION}"
-          # Add build-tools to PATH in *this* step too — the `$GITHUB_ENV` line
-          # below only takes effect for subsequent steps.
-          export PATH="${BT_DIR}:$PATH"
-          command -v aapt && aapt version | head -1
-          # Persist for the next step.
-          echo "PATH=${BT_DIR}:$PATH" >> "$GITHUB_ENV"
+        run: bash scripts/install_aapt.sh
 
-      - name: Download APKs using unified-downloader
+      - name: Pre-download APKs (parallel)
         id: download-apks
-        if: steps.version-check.outputs.should-build == 'true'
-        run: |
-          set -euo pipefail
-          # Re-affirm PATH (aapt is needed by the unified-downloader child
-          # processes); $GITHUB_ENV carries it across step boundaries but
-          # being explicit makes failures easier to read.
-          export ANDROID_HOME=/tmp/android-sdk
-          export PATH="$ANDROID_HOME/build-tools/${ANDROID_BUILD_TOOLS_VERSION}:$PATH"
+        if: steps.check.outputs.should-build == 'true'
+        env:
+          REPO_VERSIONS: ${{ steps.check.outputs.repo-versions }}
+          ANDROID_HOME: /tmp/android-sdk
+          ANDROID_BUILD_TOOLS_VERSION: ${{ steps.aapt.outputs.ANDROID_BUILD_TOOLS_VERSION }}
+        run: bash scripts/pre_download_apks.sh
 
-          RESULTS_DIR="$RUNNER_TEMP/download_results"
-          mkdir -p "$RESULTS_DIR"
-
-          while IFS= read -r PKG; do
-            (
-              PATCH_REPO="$(jq -r --arg pkg "$PKG" '.patch_repos[$pkg].repo // empty' config.json)"
-              PATCH_SLUG="${PATCH_REPO//\//-}"
-              MPP_FILE="tools/${PATCH_SLUG}.mpp"
-              if [ -z "$PATCH_REPO" ] || [ ! -f "$MPP_FILE" ]; then
-                echo "No .mpp available for $PKG; skipping."
-                exit 0
-              fi
-              PINNED_VERSION="$(jq -r --arg pkg "$PKG" '.patch_repos[$pkg].pin_version // empty' config.json)"
-              if [ -n "$PINNED_VERSION" ] && [ "$PINNED_VERSION" != "null" ]; then
-                echo "Using pinned version for $PKG: $PINNED_VERSION"
-                VERSION_TO_DOWNLOAD="$PINNED_VERSION"
-              else
-                cp "$MPP_FILE" tools/patches.mpp
-                VERSIONS_OUTPUT=$(java -jar tools/morphe-cli.jar list-versions -f "$PKG" --patches=tools/patches.mpp 2>/dev/null || echo "")
-                VERSION_TO_DOWNLOAD=$(echo "$VERSIONS_OUTPUT" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)
-              fi
-              if [ -z "$VERSION_TO_DOWNLOAD" ]; then
-                echo "Could not determine version for $PKG, skipping..."
-                exit 0
-              fi
-              APK_DIR="tools/apks"
-              mkdir -p "$APK_DIR"
-              RESULT=$(node .github/scripts/unified-downloader.js "$PKG" "$VERSION_TO_DOWNLOAD" "$APK_DIR" 2>&1) || true
-              if echo "$RESULT" | jq -e '.success' >/dev/null 2>&1; then
-                URL=$(echo "$RESULT" | jq -r '.url // empty')
-                if [ -n "$URL" ] && [ "$URL" != "null" ]; then
-                  echo "$PKG:$VERSION_TO_DOWNLOAD:$URL" > "$RESULTS_DIR/${PKG}.txt"
-                fi
-              else
-                echo "Failed to download $PKG: $RESULT" > "$RESULTS_DIR/${PKG}.failed"
-                if [ -n "$PINNED_VERSION" ] && [ "$PINNED_VERSION" != "null" ]; then
-                  cp "$MPP_FILE" tools/patches.mpp
-                  FALLBACK_VERSIONS=$(java -jar tools/morphe-cli.jar list-versions -f "$PKG" --patches=tools/patches.mpp 2>/dev/null || echo "")
-                  FALLBACK_VERSION=$(echo "$FALLBACK_VERSIONS" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)
-                  if [ -n "$FALLBACK_VERSION" ]; then
-                    FALLBACK_RESULT=$(node .github/scripts/unified-downloader.js "$PKG" "$FALLBACK_VERSION" "$APK_DIR" 2>&1) || true
-                    if echo "$FALLBACK_RESULT" | jq -e '.success' >/dev/null 2>&1; then
-                      FALLBACK_URL=$(echo "$FALLBACK_RESULT" | jq -r '.url // empty')
-                      if [ -n "$FALLBACK_URL" ] && [ "$FALLBACK_URL" != "null" ]; then
-                        echo "$PKG:$FALLBACK_VERSION:$FALLBACK_URL" > "$RESULTS_DIR/${PKG}.txt"
-                      fi
-                    fi
-                  fi
-                fi
-              fi
-            ) &
-          done < <(jq -r '.patch_repos | keys[]' config.json)
-          wait
-
-          # Merge per-package results and process URLs
-          cat "$RESULTS_DIR"/*.txt 2>/dev/null > "$RESULTS_DIR/merged.txt" || true
-          if [ -f "$RESULTS_DIR/merged.txt" ] && [ -s "$RESULTS_DIR/merged.txt" ]; then
-            while IFS=: read -r pkg ver url; do
-              [ -z "$pkg" ] && continue
-              node .github/scripts/update-download-urls.js "$pkg" "$ver" "$url" || true
-            done < "$RESULTS_DIR/merged.txt"
-          fi
-
-      - name: Upload downloaded APKs
-        if: steps.version-check.outputs.should-build == 'true'
+      - name: Upload pre-downloaded APKs
+        if: steps.check.outputs.should-build == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: pre-downloaded-apks
@@ -454,7 +161,6 @@ jobs:
         include: ${{ fromJSON(needs.check-versions.outputs.matrix-include) }}
 
     env:
-      # Where we'll put tools/artifacts
       GH_TOKEN: ${{ github.token }}
       TOOLS_DIR: tools
       APKS_DIR: apps
@@ -474,26 +180,22 @@ jobs:
         uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: "17" # any current LTS JRE is fine to run the CLI [9](https://aur.archlinux.org/packages/morphe-cli)
+          java-version: "17"
 
       - name: Verify dependencies
         id: deps
         run: |
-          set -euo pipefail
-
-          echo "Verifying available tools..."
-
-          # Check for required tools (ubuntu-latest has these pre-installed)
           for tool in curl jq unzip; do
-            if command -v "$tool" &> /dev/null; then
-              echo "✓ $tool found: $(which $tool)"
-            else
+            if ! command -v "$tool" >/dev/null 2>&1; then
               echo "::error::$tool not found"
               exit 1
             fi
+            echo "✓ $tool found: $(command -v "$tool")"
           done
 
-          echo "All dependencies verified"
+      - name: Install BouncyCastle
+        if: steps.cache-bc.outputs.cache-hit != 'true'
+        run: bash scripts/install_bouncycastle.sh
 
       - name: Cache BouncyCastle
         id: cache-bc
@@ -502,138 +204,66 @@ jobs:
           path: /usr/share/java/bcprov.jar
           key: bouncycastle-bcprov-1.77
 
-      - name: Install BouncyCastle for signing
-        if: steps.cache-bc.outputs.cache-hit != 'true'
-        run: |
-          set -euo pipefail
-          echo "Installing BouncyCastle for APK signing..."
-
-          # Create a directory for the JAR
-          mkdir -p /tmp/bouncycastle
-
-          # Download BouncyCastle directly (it's a well-known stable JAR)
-          BCOPS_VERSION="1.77"
-          BCOPS_URL="https://repo1.maven.org/maven2/org/bouncycastle/bcprov-jdk18on/$BCOPS_VERSION/bcprov-jdk18on-$BCOPS_VERSION.jar"
-          BCPROV_JAR="/tmp/bouncycastle/bcprov.jar"
-
-          echo "Downloading BouncyCastle from Maven Central..."
-          if curl -sSL "$BCOPS_URL" -o "$BCPROV_JAR"; then
-            echo "✓ BouncyCastle downloaded: $BCPROV_JAR"
-            # Also copy to where the signing step expects it
-            mkdir -p /usr/share/java
-            cp "$BCPROV_JAR" /usr/share/java/bcprov.jar
-            echo "✓ Copied to /usr/share/java/bcprov.jar"
-          else
-            echo "::error::Failed to download BouncyCastle"
-            exit 1
-          fi
-
-      - name: Download apkeep from check-versions
+      - name: Restore apkeep + Playwright from check-versions
         uses: actions/download-artifact@v8
         with:
           name: apkeep-binary
           path: /usr/local/bin
         continue-on-error: true
 
-      - name: Ensure apkeep is executable
-        run: |
-          if [ -f /usr/local/bin/apkeep ]; then
-            chmod +x /usr/local/bin/apkeep
-            apkeep --version
-          else
-            # Download failed, try cache
-            echo "apkeep not found in artifact, will try cache"
-            exit 1
-          fi
-
-      - name: Cache apkeep (fallback)
-        uses: actions/cache@v5
-        with:
-          path: /usr/local/bin/apkeep
-          key: apkeep-${{ runner.os }}-v1
-
-      - name: Install apkeep (fallback)
-        run: |
-          if [ -f /usr/local/bin/apkeep ]; then
-            echo "Using existing apkeep"
-          else
-            echo "Installing apkeep..."
-            APKEEP_VERSION="0.18.0"
-            APKEEP_URL="https://github.com/EFForg/apkeep/releases/download/${APKEEP_VERSION}/apkeep-x86_64-unknown-linux-gnu"
-            curl -sSL "$APKEEP_URL" -o /usr/local/bin/apkeep
-            chmod +x /usr/local/bin/apkeep
-            apkeep --version
-          fi
-
-      - name: Prepare dirs
-        run: |
-          mkdir -p "$TOOLS_DIR" "$APKS_DIR" "$OUT_DIR"
-
-      - name: Download pre-downloaded APKs from check-versions
+      - name: Restore pre-downloaded APKs from check-versions
         uses: actions/download-artifact@v8
         with:
           name: pre-downloaded-apks
-          path: "${{ env.TOOLS_DIR }}"
+          path: ${{ env.TOOLS_DIR }}
         continue-on-error: true
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: '24'
-
-      - name: Install Playwright
-        run: npm ci
-
-      - name: Download Playwright browsers from check-versions
+      - name: Restore Playwright browsers from check-versions
         uses: actions/download-artifact@v8
         with:
           name: playwright-browsers
           path: ~/.cache/ms-playwright
         continue-on-error: true
 
-      - name: Install Playwright browsers (fallback if artifact not available)
+      - name: Prepare build dirs
+        run: mkdir -p "$TOOLS_DIR" "$APKS_DIR" "$OUT_DIR"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
+      - name: Restore node_modules from check-versions
+        uses: actions/download-artifact@v8
+        with:
+          name: node-modules
+          path: node_modules
         continue-on-error: true
-        env:
-          # Same GCS mirror + path-patch as check-versions (see comments there).
-          PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST: https://storage.googleapis.com/chrome-for-testing-public
+
+      - name: Install Node dependencies (fallback if restore failed)
         run: |
-          set -euo pipefail
-          # Restore execute permissions lost during artifact upload/download.
-          # The whole chromium-* dir needs +x (chrome, headless_shell, sandbox,
-          # crashpad_handler, ...) — the old glob only covered two binaries and
-          # was the reason launches hung silently on the cancelled run.
-          if [ -d "$HOME/.cache/ms-playwright" ]; then
-            find "$HOME/.cache/ms-playwright" -type f -exec chmod +x {} + 2>/dev/null || true
-          fi
-          # Install if not present at all. 5 min ceiling, best-effort.
-          if ! find "$HOME/.cache/ms-playwright" -name 'chrome' 2>/dev/null | grep -q . \
-             && ! find "$HOME/.cache/ms-playwright" -name 'chrome-headless-shell' 2>/dev/null | grep -q .; then
-            # Same custom installer as check-versions. The patch is a
-            # real file so the heredoc-with-indented-terminator bug
-            # that broke earlier versions of this step can't recur.
-            NODE_OPTIONS="--require=$GITHUB_WORKSPACE/.github/scripts/patch-playwright-cft-path.js" \
-              timeout 300 node "$GITHUB_WORKSPACE/.github/scripts/install-playwright-browsers.js" || \
-              echo "::warning::playwright fallback install failed; APKMirror scraper will be unavailable"
+          if [ ! -d node_modules ] || [ ! -d node_modules/playwright ]; then
+            echo "::warning::node_modules restore failed; running npm ci as fallback"
+            npm ci
           fi
 
-      - name: Smoke-test Playwright Chromium
-        continue-on-error: true
+      - name: Install Playwright browsers (fallback if missing)
+        env:
+          PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST: https://storage.googleapis.com/chrome-for-testing-public
+        run: bash scripts/install_playwright.sh
+
+      - name: Ensure apkeep is available
         run: |
-          set -euo pipefail
-          # Best-effort. The unified-downloader falls back to apkeep and
-          # apkmirror-api first, so a missing/broken Playwright is non-fatal.
-          node -e '
-            const { chromium } = require("playwright");
-            (async () => {
-              const t0 = Date.now();
-              const browser = await chromium.launch({
-                headless: true,
-                args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
-              });
-              await browser.close();
-              console.log("Chromium OK in", Date.now() - t0, "ms");
-            })().catch((e) => { console.error("Chromium smoke-test FAILED:", e.message); process.exit(1); });
-          '
+          # Artifact download strips executable bits; restore them.
+          if [ -f /usr/local/bin/apkeep ] && [ ! -x /usr/local/bin/apkeep ]; then
+            echo "::warning::apkeep on disk without +x; chmod +x"
+            chmod +x /usr/local/bin/apkeep
+          fi
+          if ! command -v apkeep >/dev/null 2>&1 || [ ! -x /usr/local/bin/apkeep ]; then
+            echo "::warning::apkeep missing or not executable after artifact restore; reinstalling"
+            bash scripts/install_apkeep.sh
+          fi
+          apkeep --version
 
       - name: Cache patches .mpp
         uses: actions/cache@v5
@@ -653,83 +283,20 @@ jobs:
 
       - name: Get latest Morphe patches + CLI + APKEditor
         id: morphe
-        run: |
-          set -euo pipefail
+        env:
+          PATCH_REPO: ${{ matrix.patchRepo }}
+          PATCH_TAG: ${{ matrix.patchTag }}
+          PATCH_SLUG: ${{ matrix.patchSlug }}
+          CLI_VERSION: ${{ env.CLI_VERSION }}
+          TOOLS_DIR: ${{ env.TOOLS_DIR }}
+        run: bash scripts/fetch_morphe_tools.sh
 
-          # Validate required env vars
-          if [ -z "${PATCH_REPO:-}" ] || [ -z "${PATCH_TAG:-}" ] || [ -z "${PATCH_SLUG:-}" ]; then
-            echo "::error::PATCH_REPO/PATCH_TAG/PATCH_SLUG not set. Check check-versions matrix output."
-            exit 1
-          fi
-
-          CLI_TAG="${CLI_VERSION}"
-          if [ -z "$CLI_TAG" ]; then
-            echo "::error::Missing CLI release version. cli='$CLI_TAG'"
-            exit 1
-          fi
-
-          MPP_DEST="$TOOLS_DIR/${PATCH_SLUG}.mpp"
-
-          # Download .mpp if not cached
-          if [ ! -f "$MPP_DEST" ]; then
-            echo "Downloading patches from ${PATCH_REPO}@${PATCH_TAG}..."
-            gh release download "$PATCH_TAG" \
-              --repo "$PATCH_REPO" \
-              --pattern 'patches-*.mpp' \
-              --dir "$TOOLS_DIR" >/dev/null
-            # Rename to slug-named file
-            for f in "$TOOLS_DIR"/patches-*.mpp; do
-              [ -f "$f" ] && mv "$f" "$MPP_DEST" && echo "Saved as ${MPP_DEST}"
-              break
-            done
-          else
-            echo "Using cached ${MPP_DEST}"
-          fi
-
-          if [ ! -f "$MPP_DEST" ]; then
-            echo "::error::Failed to obtain ${MPP_DEST} from ${PATCH_REPO}@${PATCH_TAG}."
-            exit 1
-          fi
-          echo "patches_tag=${PATCH_TAG}" >> "$GITHUB_OUTPUT"
-
-          # Always fetch patches-list.json (small file, always needed)
-          curl -fsSL "https://raw.githubusercontent.com/${PATCH_REPO}/${PATCH_TAG}/patches-list.json" \
-            -o "$TOOLS_DIR/patches-list.json"
-
-          if [ ! -f "$TOOLS_DIR/morphe-cli.jar" ]; then
-            echo "cli_tag=$CLI_TAG" >> "$GITHUB_OUTPUT"
-            gh release download "$CLI_TAG" \
-              --repo MorpheApp/morphe-cli \
-              --pattern 'morphe-cli-*-all.jar' \
-              --dir "$TOOLS_DIR" >/dev/null
-          else
-            echo "cli_tag=$CLI_TAG" >> "$GITHUB_OUTPUT"
-            echo "Using cached morphe-cli.jar"
-          fi
-
-          # Download APKEditor for split APK merge (.xapk/.apkm/.apks -> standalone .apk).
-          APKEDITOR_TAG="$(gh release view --repo REAndroid/APKEditor --json tagName -q .tagName)"
-          APKEDITOR_ASSET="$(
-            gh release view "$APKEDITOR_TAG" --repo REAndroid/APKEditor --json assets \
-              -q '.assets[] | select(.name | endswith(".jar")) | .name' \
-              | head -n1
-          )"
-          if [ -z "$APKEDITOR_ASSET" ]; then
-            echo "::error::Could not find APKEditor .jar asset on release ${APKEDITOR_TAG}."
-            exit 1
-          fi
-          gh release download "$APKEDITOR_TAG" \
-            --repo REAndroid/APKEditor \
-            --pattern "$APKEDITOR_ASSET" \
-            --dir "$TOOLS_DIR" >/dev/null
-
-          APKEDITOR_JAR_PATH="$TOOLS_DIR/$APKEDITOR_ASSET"
-          if [ ! -f "$APKEDITOR_JAR_PATH" ]; then
-            echo "::error::APKEditor download failed: $APKEDITOR_JAR_PATH"
-            exit 1
-          fi
-          echo "apkeditor_jar=$APKEDITOR_JAR_PATH" >> "$GITHUB_OUTPUT"
-          echo "Downloaded APKEditor ${APKEDITOR_TAG}: ${APKEDITOR_ASSET}"
+      - name: Prepare inputs for resolve + download
+        id: targetver_prep
+        env:
+          APP_ID: ${{ matrix.appId }}
+          PATCH_REPO: ${{ matrix.patchRepo }}
+        run: bash scripts/prepare_target_version.sh
 
       - name: Resolve supported version for ${{ matrix.appId }}
         id: targetver
@@ -737,19 +304,9 @@ jobs:
           APP_ID: ${{ matrix.appId }}
           PATCH_REPO: ${{ matrix.patchRepo }}
           TOOLS_DIR: ${{ env.TOOLS_DIR }}
-        run: |
-          set -euo pipefail
-          # Pre-compute the two patch-list-derived inputs the script needs.
-          # Doing this inline keeps the script free of patches.json / config.json
-          # knowledge, so it can be exercised independently.
-          PINNED_VERSION="$(jq -r --arg pkg "$APP_ID" '.patch_repos[$pkg].pin_version // empty' config.json 2>/dev/null || true)"
-          DISABLED_PATCHES_JSON="$(jq -c \
-            --arg repo "$PATCH_REPO" \
-            --arg pkg "$APP_ID" \
-            '.[$repo][$pkg] // {} | to_entries | map(select(.value == false) | .key)' \
-            patches.json 2>/dev/null || echo '[]')"
-          export PINNED_VERSION DISABLED_PATCHES_JSON
-          node "$GITHUB_WORKSPACE/.github/scripts/resolve-supported-version.js"
+          PINNED_VERSION: ${{ steps.targetver_prep.outputs.pinned }}
+          DISABLED_PATCHES_JSON: ${{ steps.targetver_prep.outputs.disabled }}
+        run: node "$GITHUB_WORKSPACE/.github/scripts/resolve-supported-version.js"
 
       - name: Cache APK for ${{ matrix.appId }}
         id: cache-apk
@@ -760,33 +317,10 @@ jobs:
           restore-keys: apk-${{ matrix.appId }}-
 
       - name: Install aapt for APK version validation
+        id: aapt
         env:
           ANDROID_HOME: /tmp/android-sdk
-        run: |
-          set -euo pipefail
-          BT_VERSION="$(node "$GITHUB_WORKSPACE/.github/scripts/install-aapt.js" \
-            | grep '^ANDROID_BUILD_TOOLS_VERSION=' | cut -d= -f2)"
-          BT_DIR="$ANDROID_HOME/build-tools/${BT_VERSION}"
-          # Add build-tools to PATH in *this* step too — the `$GITHUB_ENV` line
-          # below only takes effect for subsequent steps.
-          export PATH="${BT_DIR}:$PATH"
-          command -v aapt && aapt version | head -1
-          # Persist for the next step.
-          echo "PATH=${BT_DIR}:$PATH" >> "$GITHUB_ENV"
-
-      - name: Prepare inputs for download-supported-apk.js
-        id: targetver_prep
-        env:
-          APP_ID: ${{ matrix.appId }}
-          PATCH_REPO: ${{ matrix.patchRepo }}
-        run: |
-          set -euo pipefail
-          PINNED="$(jq -r --arg pkg "$APP_ID" '.patch_repos[$pkg].pin_version // empty' config.json 2>/dev/null || true)"
-          MORPHE_CLI_JAR="$(ls -1 $TOOLS_DIR/morphe-cli-*-all.jar 2>/dev/null | head -n1 || true)"
-          MANUAL_URL="$(jq -r --arg pkg "$APP_ID" '.download_urls?[$pkg]?["latest_supported"] // empty' config.json 2>/dev/null || true)"
-          echo "pinned=$PINNED" >> "$GITHUB_OUTPUT"
-          echo "jar=$MORPHE_CLI_JAR" >> "$GITHUB_OUTPUT"
-          echo "url=$MANUAL_URL" >> "$GITHUB_OUTPUT"
+        run: bash scripts/install_aapt.sh
 
       - name: Download supported APK for ${{ matrix.appId }}
         id: getapk
@@ -802,533 +336,52 @@ jobs:
           MORPHE_CLI_JAR: ${{ steps.targetver_prep.outputs.jar }}
           MANUAL_URL: ${{ steps.targetver_prep.outputs.url }}
           RUNNER_TEMP: ${{ runner.temp }}
-        run: |
-          set -euo pipefail
-          node "$GITHUB_WORKSPACE/.github/scripts/download-supported-apk.js"
+        run: node "$GITHUB_WORKSPACE/.github/scripts/download-supported-apk.js"
 
       - name: Prepare signing keystore (required)
         id: keystore
-        run: |
-          set -euo pipefail
-
-          KEYSTORE_B64="${{ secrets.KEYSTORE_BASE64 }}"
-          KEYSTORE_PASSWORD="${{ secrets.KEYSTORE_PASSWORD }}"
-          KEY_PASSWORD_RAW="${{ secrets.KEY_PASSWORD }}"
-          KEY_ALIAS_INPUT="${{ secrets.KEY_ALIAS }}"
-
-          if [ -z "$KEYSTORE_B64" ]; then
-            echo "::error::KEYSTORE_BASE64 secret is required (signed builds are enforced)."
-            exit 1
-          fi
-          if [ -z "$KEYSTORE_PASSWORD" ]; then
-            echo "::error::KEYSTORE_PASSWORD secret is required (signed builds are enforced)."
-            exit 1
-          fi
-          BCPROV_JAR="$(ls -1 /usr/share/java/bcprov*.jar 2>/dev/null | head -n1 || true)"
-          if [ -z "$BCPROV_JAR" ] || [ ! -f "$BCPROV_JAR" ]; then
-            echo "::error::BouncyCastle provider JAR not found on runner."
-            exit 1
-          fi
-
-          # Two output keystores, both with the same credentials as the source:
-          #   morphe.bks — for morphe-cli. morphe-cli (via morphe-patcher) hardcodes
-          #     KeyStore.getInstance("BKS", BouncyCastleProvider.PROVIDER_NAME) in
-          #     ApkSigner.kt to load the signing keystore. A PKCS12 file fails with
-          #     "Wrong version of key store" because BouncyCastle's BKS loader
-          #     checks the file magic and PKCS12 doesn't have it.
-          #   morphe.p12 — for apksigner. apksigner in build-tools 35.0.0 dropped
-          #     the `--provider-classpath` flag, and apksigner.jar doesn't bundle
-          #     BouncyCastle, so BKS would require us to extend the classpath via
-          #     `java -cp apksigner.jar:bcprov.jar` (bypassing the apksigner
-          #     shell wrapper). PKCS12 is the standard JCE default type, so the
-          #     apksigner call is a one-liner with no provider plumbing.
-          # Both are produced from the same source so a single KEYSTORE_BASE64
-          # secret serves both consumers.
-          RAW_KEYSTORE="$TOOLS_DIR/source.keystore"
-          BKS_KEYSTORE="$TOOLS_DIR/morphe.bks"
-          P12_KEYSTORE="$TOOLS_DIR/morphe.p12"
-          rm -f "$RAW_KEYSTORE" "$BKS_KEYSTORE" "$P12_KEYSTORE"
-
-          echo "$KEYSTORE_B64" | base64 -d > "$RAW_KEYSTORE"
-
-          detect_keystore_type() {
-            local type="$1"
-            local -a args=(keytool -list -keystore "$RAW_KEYSTORE" -storetype "$type" -storepass "$KEYSTORE_PASSWORD")
-            if [ "$type" = "BKS" ] || [ "$type" = "UBER" ]; then
-              args+=(-providerclass org.bouncycastle.jce.provider.BouncyCastleProvider -providerpath "$BCPROV_JAR")
-            fi
-            "${args[@]}" >/dev/null 2>&1
-          }
-
-          SRC_TYPE=""
-          for t in PKCS12 JKS BKS UBER; do
-            if detect_keystore_type "$t"; then
-              SRC_TYPE="$t"
-              break
-            fi
-          done
-
-          if [ -z "$SRC_TYPE" ]; then
-            echo "::error::Could not detect source keystore type using PKCS12/JKS/BKS/UBER."
-            exit 1
-          fi
-          echo "Detected source keystore type: $SRC_TYPE"
-
-          IMPORT_LOG="$RUNNER_TEMP/keytool_import_${{ matrix.name }}.log"
-          run_import() {
-              local mode="$1"
-              local dest="$2"
-              shift 2
-              echo "Converting keystore to $dest (mode=$mode)..."
-              set +e
-              "$@" >"$IMPORT_LOG" 2>&1
-              local rc=$?
-              set -e
-              if [ "$rc" -ne 0 ]; then
-                echo "::warning::keytool import failed in mode=$mode"
-                cat "$IMPORT_LOG" || true
-              fi
-              return "$rc"
-            }
-
-          IMPORT_BASE_ARGS=(
-            keytool -importkeystore -noprompt
-            -srckeystore "$RAW_KEYSTORE"
-            -srcstoretype "$SRC_TYPE"
-            -srcstorepass "$KEYSTORE_PASSWORD"
-            -deststorepass "$KEYSTORE_PASSWORD"
-            -providerclass org.bouncycastle.jce.provider.BouncyCastleProvider
-            -providerpath "$BCPROV_JAR"
-          )
-
-          BKS_IMPORT_ARGS=(
-            "${IMPORT_BASE_ARGS[@]}"
-            -destkeystore "$BKS_KEYSTORE"
-            -deststoretype BKS
-          )
-
-          # Try import without explicit key password first. This works for the common case where
-          # key password matches store password and avoids false failures from wrong KEY_PASSWORD.
-          if ! run_import "no-keypass" "BKS" "${BKS_IMPORT_ARGS[@]}"; then
-            # Retry with explicit key password if provided.
-            if [ -n "$KEY_PASSWORD_RAW" ]; then
-              rm -f "$BKS_KEYSTORE"
-              if ! run_import "explicit-keypass" "BKS" "${BKS_IMPORT_ARGS[@]}" -srckeypass "$KEY_PASSWORD_RAW" -destkeypass "$KEY_PASSWORD_RAW"; then
-                echo "::error::Failed to convert keystore to BKS."
-                echo "::error::Check KEYSTORE_PASSWORD and KEY_PASSWORD secrets."
-                exit 1
-              fi
-            else
-              echo "::error::Failed to convert keystore to BKS."
-              echo "::error::If your key password differs from KEYSTORE_PASSWORD, set KEY_PASSWORD secret."
-              exit 1
-            fi
-          fi
-
-          if [ ! -f "$BKS_KEYSTORE" ]; then
-            echo "::error::Failed to create converted BKS keystore."
-            exit 1
-          fi
-
-          # Derive the PKCS12 copy for apksigner from the BKS one we just produced.
-          # BKS -> PKCS12 keeps the same key material and passwords; we just need a
-          # second keytool pass with the BKS keystore as source and PKCS12 as dest.
-          # BC provider still has to be on the classpath because keytool needs it to
-          # *read* the BKS source. Without it this fails with the same "Wrong version
-          # of key store" error morphe-cli itself surfaced.
-          P12_IMPORT_ARGS=(
-            "${IMPORT_BASE_ARGS[@]}"
-            -srckeystore "$BKS_KEYSTORE"
-            -srcstoretype BKS
-            -destkeystore "$P12_KEYSTORE"
-            -deststoretype PKCS12
-          )
-
-          if ! run_import "no-keypass" "PKCS12" "${P12_IMPORT_ARGS[@]}"; then
-            if [ -n "$KEY_PASSWORD_RAW" ]; then
-              rm -f "$P12_KEYSTORE"
-              if ! run_import "explicit-keypass" "PKCS12" "${P12_IMPORT_ARGS[@]}" -srckeypass "$KEY_PASSWORD_RAW" -destkeypass "$KEY_PASSWORD_RAW"; then
-                echo "::error::Failed to convert BKS keystore to PKCS12 for apksigner."
-                exit 1
-              fi
-            else
-              echo "::error::Failed to convert BKS keystore to PKCS12 for apksigner."
-              exit 1
-            fi
-          fi
-
-          if [ ! -f "$P12_KEYSTORE" ]; then
-            echo "::error::Failed to create PKCS12 keystore for apksigner."
-            exit 1
-          fi
-
-          list_aliases() {
-            keytool -list \
-              -keystore "$BKS_KEYSTORE" \
-              -storetype BKS \
-              -storepass "$KEYSTORE_PASSWORD" \
-              -providerclass org.bouncycastle.jce.provider.BouncyCastleProvider \
-              -providerpath "$BCPROV_JAR" \
-              2>/dev/null | awk -F, '/,/{print $1}' | sed '/^$/d'
-          }
-
-          mapfile -t KEY_ALIASES < <(list_aliases)
-          if [ "${#KEY_ALIASES[@]}" -eq 0 ]; then
-            echo "::error::No aliases found in converted keystore."
-            exit 1
-          fi
-
-          KEY_ALIAS="$KEY_ALIAS_INPUT"
-          if [ -z "$KEY_ALIAS" ]; then
-            KEY_ALIAS="${KEY_ALIASES[0]}"
-            echo "No KEY_ALIAS provided; using alias '$KEY_ALIAS'."
-          else
-            ALIAS_FOUND=false
-            for a in "${KEY_ALIASES[@]}"; do
-              if [ "$a" = "$KEY_ALIAS" ]; then
-                ALIAS_FOUND=true
-                break
-              fi
-            done
-            if [ "$ALIAS_FOUND" = false ]; then
-              echo "::error::KEY_ALIAS '$KEY_ALIAS' was not found in the converted keystore."
-              echo "Available aliases: ${KEY_ALIASES[*]}"
-              exit 1
-            fi
-          fi
-
-          echo "path=$BKS_KEYSTORE" >> "$GITHUB_OUTPUT"
-          echo "p12_path=$P12_KEYSTORE" >> "$GITHUB_OUTPUT"
-          echo "alias=$KEY_ALIAS" >> "$GITHUB_OUTPUT"
-          echo "Prepared BKS keystore for morphe-cli and PKCS12 keystore for apksigner."
+        env:
+          TOOLS_DIR: ${{ env.TOOLS_DIR }}
+          MATRIX_NAME: ${{ matrix.name }}
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: bash scripts/prepare_keystore.sh
 
       - name: Patch ${{ matrix.name }} with morphe-cli
         id: patch
-        run: |
-          set -euo pipefail
-          JAR="$(ls -1 $TOOLS_DIR/morphe-cli*.jar | head -n1)"
-          MPP="$TOOLS_DIR/${PATCH_SLUG}.mpp"
-          if [ ! -f "$MPP" ]; then
-            echo "::error::Patch file not found: $MPP"
-            exit 1
-          fi
-          APK="${{ steps.getapk.outputs.apk }}"
-          APK_VERSION="${{ steps.getapk.outputs.version }}"
-          APK_NORM="${APK#./}"
-          KEYSTORE_FILE="${{ steps.keystore.outputs.path }}"
-          KEY_ALIAS="${{ steps.keystore.outputs.alias }}"
-          KEYSTORE_PASSWORD="${{ secrets.KEYSTORE_PASSWORD }}"
-          KEY_ENTRY_PASS="${{ secrets.KEY_PASSWORD }}"
-          if [ -z "$KEY_ENTRY_PASS" ]; then
-            KEY_ENTRY_PASS="$KEYSTORE_PASSWORD"
-          fi
-
-          # Signed builds are enforced.
-          if [ -z "$KEYSTORE_FILE" ] || [ ! -f "$KEYSTORE_FILE" ]; then
-            echo "::error::Prepared keystore file not found."
-            exit 1
-          fi
-          if [ -z "$KEYSTORE_PASSWORD" ]; then
-            echo "::error::KEYSTORE_PASSWORD secret is required for signing."
-            exit 1
-          fi
-          KEY_ARGS=(--keystore="$KEYSTORE_FILE" --keystore-password="$KEYSTORE_PASSWORD" --keystore-entry-alias="$KEY_ALIAS" --keystore-entry-password="$KEY_ENTRY_PASS")
-
-          PATCHES_HAS_ENTRY="$(jq -r \
-            --arg repo "$PATCH_REPO" \
-            --arg pkg "${{ matrix.appId }}" \
-            'has($repo) and (.[$repo] | has($pkg))' \
-            patches.json 2>/dev/null || echo "false")"
-          if [ "$PATCHES_HAS_ENTRY" != "true" ]; then
-            echo "::warning::No patches.json entry for ${PATCH_REPO}/${{ matrix.appId }}; applying all patches."
-          fi
-
-          # Build enabled/disabled lists from patches.json and pass disabled ones to morphe-cli.
-          ENABLED_PATCHES="$(jq -r \
-            --arg repo "$PATCH_REPO" \
-            --arg pkg "${{ matrix.appId }}" \
-            '.[$repo][$pkg] // {} | to_entries[] | select(.value == true) | .key' \
-            patches.json 2>/dev/null || true)"
-          DISABLED_PATCHES="$(jq -r \
-            --arg repo "$PATCH_REPO" \
-            --arg pkg "${{ matrix.appId }}" \
-            '.[$repo][$pkg] // {} | to_entries[] | select(.value == false) | .key' \
-            patches.json 2>/dev/null || true)"
-          ENABLED_COUNT="$(printf '%s\n' "$ENABLED_PATCHES" | sed '/^$/d' | wc -l | tr -d ' ')"
-          DISABLED_COUNT="$(printf '%s\n' "$DISABLED_PATCHES" | sed '/^$/d' | wc -l | tr -d ' ')"
-
-          if [ "$ENABLED_COUNT" -gt 0 ]; then
-            echo "Enabled patches for ${{ matrix.appId }} (${ENABLED_COUNT}): $(printf '%s\n' "$ENABLED_PATCHES" | sed '/^$/d' | paste -sd '; ' -)"
-          else
-            echo "Enabled patches for ${{ matrix.appId }}: none"
-          fi
-
-          if [ "$DISABLED_COUNT" -gt 0 ]; then
-            echo "Disabled patches for ${{ matrix.appId }} (${DISABLED_COUNT}): $(printf '%s\n' "$DISABLED_PATCHES" | sed '/^$/d' | paste -sd '; ' -)"
-          else
-            echo "Disabled patches for ${{ matrix.appId }}: none"
-          fi
-
-          PATCH_ARGS=()
-          while IFS= read -r patch_name; do
-            [ -z "$patch_name" ] && continue
-            PATCH_ARGS+=("-d" "$patch_name")
-          done <<< "$DISABLED_PATCHES"
-
-          # Create marker file so we can deterministically find CLI output files created in this step.
-          MARKER="$RUNNER_TEMP/morphe_${{ matrix.name }}_start.marker"
-          : > "$MARKER"
-
-          PATCH_LOG="$RUNNER_TEMP/morphe_patch_${{ matrix.name }}.log"
-          PATCH_TMP_DIR="$RUNNER_TEMP/morphe_${{ matrix.name }}"
-          # morphe-cli's default output location is apps/<basename>/<basename>-Morphe-<ver>.apk,
-          # which the find-based discovery below can't reach with -maxdepth 1. Pin the output
-          # to a deterministic temp path so we know exactly where the patched APK is.
-          PATCHED_APK="$RUNNER_TEMP/morphe_${{ matrix.name }}_patched.apk"
-          rm -f "$PATCHED_APK"
-
-          run_patch() {
-            local mode="$1"
-            shift
-            echo "Running morphe-cli for ${{ matrix.appId }} (v$APK_VERSION, mode=$mode)..."
-            set +e
-            "$@" 2>&1 | tee "$PATCH_LOG"
-            local rc=${PIPESTATUS[0]}
-            set -e
-            return "$rc"
-          }
-
-          build_patch_cmd() {
-            local -a cmd=(java -jar "$JAR" patch --patches="$MPP")
-            cmd+=("${KEY_ARGS[@]}")
-            cmd+=(--temporary-files-path="$PATCH_TMP_DIR" --purge)
-            cmd+=(--out="$PATCHED_APK")
-            cmd+=("${PATCH_ARGS[@]}")
-            cmd+=("$APK")
-            printf '%s\0' "${cmd[@]}"
-          }
-
-          mapfile -d '' -t PATCH_CMD < <(build_patch_cmd)
-          if ! run_patch "signed-required" "${PATCH_CMD[@]}"; then
-            if grep -q "Wrong version of key store" "$PATCH_LOG"; then
-              echo "::error::Morphe could not read the provided keystore (Wrong version of key store)."
-              echo "::error::Ensure KEYSTORE_BASE64 decodes to a valid keystore and KEYSTORE_PASSWORD/KEY_PASSWORD are correct."
-            fi
-            exit 1
-          fi
-
-          # Primary path: morphe-cli was invoked with --out="$PATCHED_APK", so the
-          # patched APK should be at that deterministic location. Fall back to a
-          # scan of the current dir / APKS_DIR if --out wasn't honored for any reason.
-          OUT_APK=""
-          if [ -f "$PATCHED_APK" ]; then
-            OUT_APK="$PATCHED_APK"
-          else
-            # Collect output: prefer APKs newer than marker and not equal to input APK.
-            OUT_APK="$( \
-              { find . -maxdepth 1 -type f -name "*.apk" -newer "$MARKER" -printf '%T@ %p\n' || true; \
-                find "$APKS_DIR" -maxdepth 1 -type f -name "*.apk" -newer "$MARKER" -printf '%T@ %p\n' || true; } \
-              | sort -nr \
-              | cut -d' ' -f2- \
-              | awk -v apk="$APK_NORM" '
-                  {
-                    line=$0
-                    sub(/^\.\//, "", line)
-                    if (line != "" && line != apk && out == "") out=line
-                  }
-                  END { if (out != "") print out }
-                ' \
-            )"
-
-            # Fallback: pick newest non-input APK if timestamps are not reliable.
-            if [ -z "$OUT_APK" ] || [ ! -f "$OUT_APK" ]; then
-              OUT_APK="$( \
-                { find . -maxdepth 1 -type f -name "*.apk" -printf '%T@ %p\n' || true; \
-                  find "$APKS_DIR" -maxdepth 1 -type f -name "*.apk" -printf '%T@ %p\n' || true; } \
-                | sort -nr \
-                | cut -d' ' -f2- \
-                | awk -v apk="$APK_NORM" '
-                    {
-                      line=$0
-                      sub(/^\.\//, "", line)
-                      if (line != "" && line != apk && out == "") out=line
-                    }
-                    END { if (out != "") print out }
-                  ' \
-              )"
-            fi
-          fi
-          if [ -z "$OUT_APK" ] || [ ! -f "$OUT_APK" ]; then
-            echo "::error::Could not locate patched APK output"
-            echo "Expected at: $PATCHED_APK"
-            echo "Files in current directory:"
-            ls -la
-            echo "Files in $APKS_DIR:"
-            ls -la "$APKS_DIR" || true
-            exit 1
-          fi
-
-          # Rename with version info
-          OUTPUT_NAME="${{ matrix.name }}-v${APK_VERSION}-${PATCH_TAG}.apk"
-          mv "$OUT_APK" "$OUT_DIR/$OUTPUT_NAME"
-          echo "output=$OUTPUT_NAME" >> "$GITHUB_OUTPUT"
+        env:
+          APP_ID: ${{ matrix.appId }}
+          APP_NAME: ${{ matrix.name }}
+          APK: ${{ steps.getapk.outputs.apk }}
+          APK_VERSION: ${{ steps.getapk.outputs.version }}
+          PATCH_TAG: ${{ matrix.patchTag }}
+          PATCH_REPO: ${{ matrix.patchRepo }}
+          PATCH_SLUG: ${{ matrix.patchSlug }}
+          KEYSTORE_FILE: ${{ steps.keystore.outputs.path }}
+          KEY_ALIAS: ${{ steps.keystore.outputs.alias }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ENTRY_PASS: ${{ secrets.KEY_PASSWORD }}
+          TOOLS_DIR: ${{ env.TOOLS_DIR }}
+          OUT_DIR: ${{ env.OUT_DIR }}
+          APKS_DIR: ${{ env.APKS_DIR }}
+          RUNNER_TEMP: ${{ runner.temp }}
+        run: bash scripts/patch_apk.sh
 
       - name: Patch APK version for Obtainium
         if: success()
         env:
+          APK: ${{ steps.patch.outputs.output }}
+          APK_VERSION: ${{ steps.getapk.outputs.version }}
+          PATCH_TAG: ${{ matrix.patchTag }}
           KEYSTORE_FILE: ${{ steps.keystore.outputs.p12_path }}
           KEY_ALIAS: ${{ steps.keystore.outputs.alias }}
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: |
-          set -euo pipefail
-
-          APK="$OUT_DIR/${{ steps.patch.outputs.output }}"
-          APK_VERSION="${{ steps.getapk.outputs.version }}"
-          PATCH_TAG="${{ matrix.patchTag }}"
-
-          if [ ! -f "$APK" ]; then
-            echo "::error::APK not found at $APK"
-            exit 1
-          fi
-
-          NEW_VERSION_NAME="${APK_VERSION}+${PATCH_TAG}"
-          echo "Patching APK version for Obtainium compatibility..."
-          echo "  APK: $APK"
-          echo "  versionName: $APK_VERSION → $NEW_VERSION_NAME"
-
-          # Patch the binary AndroidManifest.xml in place via a tiny Node.js
-          # walker (scripts/patch-apk-manifest.js). History of this step:
-          #   - apktool 2.10.0/2.12.1/3.0.2 all silently exit-1'd on the
-          #     Morphe-patched YouTube/YT Music/Reddit APKs (three different
-          #     reasons: xmlpull parser bug, no-stderr silent exit,
-          #     framework-cache pollution).
-          #   - ensody/androidmanifest-changer v1.0.1 was the next attempt;
-          #     it shells out to system `aapt2 convert` which crashes on
-          #     the same APKs with `XmlDom.cpp:356 Check failed:
-          #     !node_stack.empty()`. We tried build-tools 35.0.0 to see if
-          #     Google had fixed the assertion -- they hadn't.
-          #   - This script walks the AXML chunk structure directly (AOSP
-          #     ResourceTypes.h is the spec). There are no third-party
-          #     parser assertions to trip, no JVM, no aapt round-trip. Just
-          #     a focused binary edit: overwrite the versionCode int32 in
-          #     place, append the versionName string to the pool, bump the
-          #     relevant chunk sizes. `zip -f` swaps the entry in place so
-          #     entry order and per-entry metadata are preserved.
-          #
-          # Runtime requirements (verified below):
-          #   - `zip` on PATH. patch-apk-manifest.js shells out to the
-          #     system `zip` binary (same reason androidmanifest-changer
-          #     did: Go's archive/zip produces invalid APKs). ubuntu-latest
-          #     ships it via the `unzip` parent package.
-          #   - `aapt` on PATH. Already installed earlier in this job by
-          #     .github/scripts/install-aapt.js (the same tool reused for
-          #     `aapt dump badging` below).
-          if ! command -v zip >/dev/null 2>&1; then
-            echo "::error::zip CLI is required by patch-apk-manifest.js but not on PATH"
-            echo "Install with: sudo apt-get install -y zip"
-            exit 1
-          fi
-
-          MODIFIED_APK="/tmp/modified_$$.apk"
-          ALIGNED_APK="/tmp/aligned_$$.apk"
-
-          # Read the current versionCode via aapt (no apktool decompile
-          # needed). The PATCH_TAG-derived deterministic bump below
-          # preserves the formula the apktool-based flow used, so
-          # rebuilds with the same APK + patch tag still produce the
-          # same NEW_VC.
-          CURRENT_VC=$(aapt dump badging "$APK" 2>/dev/null \
-            | sed -nE "s/.*versionCode='([0-9]+)'.*/\1/p" | head -1)
-          if [ -z "$CURRENT_VC" ]; then
-            echo "::error::Could not read versionCode from APK"
-            aapt dump badging "$APK" 2>&1 | grep -E '^package: ' || true
-            exit 1
-          fi
-
-          # Strip leading 'v', keep only digits, then mod+1 for a stable increment.
-          # Android's manifest versionCode is parsed as a signed int by aapt;
-          # Reddit currently ships at 2147483647, so any bump overflows and
-          # aapt reports versionCode='' even though versionName was patched.
-          INCREMENT=$(echo "$PATCH_TAG" | sed -E 's/^v//; s/[^0-9]+//g')
-          INCREMENT=$((INCREMENT % 10000 + 1))
-          MAX_VERSION_CODE=2147483647
-          if [ "$CURRENT_VC" -ge "$MAX_VERSION_CODE" ]; then
-            NEW_VC="$MAX_VERSION_CODE"
-            echo "::warning::Current versionCode is already at Android's signed 32-bit max; leaving versionCode unchanged and patching versionName only."
-          elif [ $((CURRENT_VC + INCREMENT)) -gt "$MAX_VERSION_CODE" ]; then
-            NEW_VC="$MAX_VERSION_CODE"
-            echo "::warning::Patch-tag versionCode bump would exceed Android's signed 32-bit max; clamping to $MAX_VERSION_CODE."
-          else
-            NEW_VC=$((CURRENT_VC + INCREMENT))
-          fi
-          echo "  versionCode: $CURRENT_VC → $NEW_VC"
-
-          # Patch the binary AndroidManifest.xml in place. The script
-          # copies $APK → $MODIFIED_APK internally, mutates the manifest
-          # entry via `zip -f`, and exits non-zero on any structural error
-          # so `set -euo pipefail` surfaces it cleanly.
-          node "$GITHUB_WORKSPACE/.github/scripts/patch-apk-manifest.js" \
-            "$APK" "$MODIFIED_APK" \
-            --version-code "$NEW_VC" \
-            --version-name "$NEW_VERSION_NAME"
-
-          # Sanity-check the patch actually landed before spending cycles
-          # on zipalign + apksigner. Compare both attributes in one regex
-          # so we catch a partial rewrite (e.g. versionCode updated but
-          # versionName stale, or vice versa).
-          #
-          # `|| VERIFIED=""` is the load-bearing bit: set -euo pipefail
-          # would otherwise kill the script at this $() the moment aapt
-          # exits non-zero, before any friendly diagnostic runs. APKs for
-          # which aapt can't fully re-parse the patched AXML still happen
-          # to be valid (patch-apk-manifest.js reported success on them),
-          # but the regex below wouldn't find versionCode/versionName, so
-          # we want to fall through to the explicit empty-result branch
-          # and surface a real error message instead of a generic exit-1.
-          VERIFIED=$(aapt dump badging "$MODIFIED_APK" 2>/dev/null \
-            | sed -nE "s/.*versionCode='([0-9]+)' versionName='([^']+)'.*/\1 \2/p" | head -1) \
-            || VERIFIED=""
-          if [ -z "$VERIFIED" ]; then
-            echo "::error::aapt dump badging failed or returned no version info for $MODIFIED_APK"
-            echo "patch-apk-manifest.js reported success; dumping aapt output for triage:"
-            aapt dump badging "$MODIFIED_APK" 2>&1 | head -40 || true
-            exit 1
-          fi
-          if [ "$VERIFIED" != "$NEW_VC $NEW_VERSION_NAME" ]; then
-            echo "::error::patch-apk-manifest.js did not produce expected versionCode/versionName"
-            echo "  expected: $NEW_VC $NEW_VERSION_NAME"
-            echo "  got:      $VERIFIED"
-            exit 1
-          fi
-          echo "  ✓ verified: $VERIFIED"
-
-          # Zipalign
-          echo "Zipaligning..."
-          zipalign -f 4 "$MODIFIED_APK" "$ALIGNED_APK"
-
-          # Re-sign with apksigner. KEYSTORE_FILE is the PKCS12 copy produced
-          # earlier (steps.keystore.outputs.p12_path), which apksigner reads
-          # natively via the default JCE provider — no provider plumbing
-          # needed. The morphe-cli signing step (steps.patch above) used the
-          # BKS copy at steps.keystore.outputs.path because morphe-patcher
-          # hardcodes `KeyStore.getInstance("BKS", BouncyCastleProvider...)`.
-          echo "Re-signing APK..."
-          KEY_PASS_IN="${KEY_PASSWORD:-$KEYSTORE_PASSWORD}"
-          apksigner sign \
-            --ks "$KEYSTORE_FILE" \
-            --ks-key-alias "$KEY_ALIAS" \
-            --ks-pass "pass:$KEYSTORE_PASSWORD" \
-            --key-pass "pass:$KEY_PASS_IN" \
-            "$ALIGNED_APK"
-
-          # Replace original APK
-          mv "$ALIGNED_APK" "$APK"
-
-          # Clean up temp files
-          rm -rf "$MODIFIED_APK"
-
-          echo "✓ APK version patched and re-signed successfully"
+          OUT_DIR: ${{ env.OUT_DIR }}
+          RUNNER_TEMP: ${{ runner.temp }}
+        run: bash scripts/patch_obtainium_version.sh
 
       - name: Upload patched ${{ matrix.name }}
         uses: actions/upload-artifact@v7
@@ -1340,14 +393,11 @@ jobs:
     needs: [check-versions, build]
     if: needs.build.result == 'success' && needs.check-versions.outputs.should-build == 'true'
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        shell: bash
     steps:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Download all APKs
+      - name: Download all patched APKs
         uses: actions/download-artifact@v8
         with:
           pattern: "*-v*"
@@ -1355,101 +405,16 @@ jobs:
           merge-multiple: true
 
       - name: List downloaded APKs
-        run: |
-          echo "Downloaded APKs:"
-          ls -la apks/
+        run: ls -la apks/
 
-      - name: Create per-app releases
+      - name: Publish per-app releases
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-
-          CLI_VERSION="${{ needs.check-versions.outputs.cli-version }}"
-          CLI_BRANCH="${{ needs.check-versions.outputs.cli-branch }}"
-          REPO_VERSIONS='${{ needs.check-versions.outputs.repo-versions }}'
-
-          PATCHES_SUMMARY="$(echo "$REPO_VERSIONS" | jq -r 'to_entries | map("- \(.key): \(.value)") | join("\n")')"
-
-          if [ -z "$(ls -A apks/)" ]; then
-            echo "::error::No APK files found in apks/ directory"
-            exit 1
-          fi
-
-          # Group APKs by app name (prefix before first -v)
-          declare -A APP_APKS
-          for apk in apks/*.apk; do
-            [ -f "$apk" ] || continue
-            apk_basename="$(basename "$apk" .apk)"
-            # Extract app name: "youtube-v20.44.38-v1.24.0-dev.8" → "youtube"
-            app_name="$(echo "$apk_basename" | sed -E 's/-v[0-9].*//')"
-            APP_APKS["$app_name"]+="$apk "
-          done
-
-          for app_name in $(printf '%s\n' "${!APP_APKS[@]}" | sort -u); do
-            # Build version string from first APK of this app
-            first_apk="$(echo "${APP_APKS[$app_name]}" | xargs -n1 | head -n1)"
-            apk_basename="$(basename "$first_apk" .apk)"
-            # version = everything after first -v: "v20.44.38-v1.24.0-dev.8"
-            version_str="$(echo "$apk_basename" | sed -E 's/^[^-]+-//')"
-
-            TAG="${app_name}-${version_str}"
-            TITLE="${app_name} (${CLI_BRANCH}-${CLI_VERSION})"
-
-            RELEASE_NOTES="$(printf '%s\n\n' \
-              "${TITLE}" \
-              "**CLI version:** ${CLI_VERSION}" \
-              "**Base + patches:** ${version_str}" \
-              "" \
-              "**Patch repo versions:**" \
-              "${PATCHES_SUMMARY}" \
-              "" \
-              "## Obtainium Setup" \
-              "Add source: GitHub" \
-              "" \
-              "- **Release tag filter:** \`^${app_name}\`" \
-              "- **APK filter:** \`^${app_name}-v.*\\.apk\$\`" \
-              "" \
-              "**Note:** The \`-v\` infix in the APK filter is required to distinguish from other APK files." \
-            )"
-
-            apk_files="${APP_APKS[$app_name]}"
-            if gh release view "$TAG" >/dev/null 2>&1; then
-              echo "Release $TAG exists; uploading assets."
-              for apk in $apk_files; do
-                # Retry on transient 404s: the release's asset-upload URL
-                # is sometimes unavailable for a few seconds after the
-                # release is created, and concurrent re-runs can also hit
-                # race conditions. Check whether the asset already exists
-                # before uploading so we don't fail on a 422 from --clobber.
-                apk_name="$(basename "$apk")"
-                if gh release view "$TAG" --json assets --jq '.assets[].name' 2>/dev/null | grep -Fxq "$apk_name"; then
-                  echo "  asset $apk_name already attached; skipping."
-                  continue
-                fi
-                uploaded=false
-                for try in 1 2 3 4 5; do
-                  if gh release upload "$TAG" "$apk" --clobber; then
-                    uploaded=true
-                    break
-                  fi
-                  echo "  upload attempt $try for $apk_name failed; retrying in 3s..."
-                  sleep 3
-                done
-                if [ "$uploaded" != "true" ]; then
-                  echo "::error::Failed to upload $apk_name to release $TAG after 5 attempts."
-                  exit 1
-                fi
-              done
-              gh release edit "$TAG" --title "$TITLE" --notes "$RELEASE_NOTES"
-            else
-              echo "::notice::Creating release $TAG"
-              gh release create "$TAG" $apk_files \
-                --title "$TITLE" \
-                --notes "$RELEASE_NOTES"
-            fi
-            echo "::notice::Published release: ${TAG}"
-          done
+          APKS_DIR: apks
+          CLI_VERSION: ${{ needs.check-versions.outputs.cli-version }}
+          CLI_BRANCH: ${{ needs.check-versions.outputs.cli-branch }}
+          REPO_VERSIONS: ${{ needs.check-versions.outputs.repo-versions }}
+        run: bash scripts/create_release.sh
 
   update-state:
     needs: [check-versions, build, create-release]
@@ -1467,171 +432,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Update state.json
-        run: |
-          set -euo pipefail
+      - name: Update state.json + sync patches.json
+        env:
+          REPO_VERSIONS: ${{ needs.check-versions.outputs.repo-versions }}
+          CLI_VERSION: ${{ needs.check-versions.outputs.cli-version }}
+          CLI_BRANCH: ${{ needs.check-versions.outputs.cli-branch }}
+        run: bash scripts/update_state.sh
 
-          # Fast-forward to whatever origin/main is at right now. Without
-          # this, our state.json would be built on the snapshot from
-          # actions/checkout at job start, which can be stale by the time
-          # a concurrent run pushes its own state update — and the rebase
-          # at commit time would then conflict on the build_history
-          # array.
-          BRANCH_NAME="${GITHUB_REF_NAME:-main}"
-          git fetch origin "${BRANCH_NAME}" || true
-          git merge --ff-only "origin/${BRANCH_NAME}" || true
-
-          REPO_VERSIONS='${{ needs.check-versions.outputs.repo-versions }}'
-          BEFORE_STATE_HASH="$(
-            if [ -f state.json ]; then sha256sum state.json | awk '{print $1}'; else echo "missing"; fi
-          )"
-          BEFORE_PATCHES_HASH="$(
-            if [ -f patches.json ]; then sha256sum patches.json | awk '{print $1}'; else echo "missing"; fi
-          )"
-
-          # Sync patches.json to repo-keyed structure. Same logic as
-          # update-patches.yml — delegated to the shared sync-patches.sh
-          # script so there's exactly one implementation.
-          REPO_VERSIONS="$REPO_VERSIONS" \
-            CONFIG_FILE=./config.json \
-            PATCHES_FILE=./patches.json \
-            RUNNER_TEMP="$RUNNER_TEMP" \
-            bash "$GITHUB_WORKSPACE/.github/scripts/sync-patches.sh"
-
-          # Ensure state file is valid JSON before merge/update.
-          if [ ! -s state.json ] || ! jq -e 'type=="object"' state.json >/dev/null 2>&1; then
-            echo "state.json is missing or invalid JSON; recreating with defaults."
-            echo '{}' > state.json
-          fi
-
-          # Build patches map for state.json: { "owner/repo": { branch, version } }
-          # Use first() to avoid duplicate outputs when multiple apps share one repo.
-          PATCHES_MAP="$(echo "$REPO_VERSIONS" | jq -c \
-            --argjson config "$(jq -c '.' config.json)" \
-            'to_entries | map({
-              key: .key,
-              value: {
-                branch: (first($config.patch_repos | to_entries[] | select(.value.repo == .key) | .value.branch) // "main" | ascii_downcase),
-                version: .value
-              }
-            }) | from_entries' 2>/dev/null || echo '{}')"
-
-          jq --argjson patches_map "$PATCHES_MAP" \
-             --arg cli "${{ needs.check-versions.outputs.cli-version }}" \
-             --arg cli_branch "${{ needs.check-versions.outputs.cli-branch }}" \
-             --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-             --arg run_id "${{ github.run_id }}" \
-             --argjson run_number "${{ github.run_number }}" \
-             --arg sha "${{ github.sha }}" \
-             '. as $s
-             | (
-                 ((.build_history // [])
-                  + [{
-                      "timestamp": $timestamp,
-                      "patches": $patches_map,
-                      "cli_version": $cli,
-                      "cli_branch": $cli_branch,
-                      "status": "success",
-                      "run_id": $run_id,
-                      "run_number": $run_number,
-                      "commit": $sha
-                  }])
-                 | if length > 30 then .[-30:] else . end
-               ) as $history
-             | {
-                 "patches": $patches_map,
-                 "cli_branch": $cli_branch,
-                 "cli_version": $cli
-               }
-             + ($s | del(
-                 .patches,
-                 .patches_branch,
-                 .patches_version,
-                 .cli_branch,
-                 .cli_version,
-                 .last_build,
-                 .status,
-                 .build_history
-               ))
-             + {
-                 "last_build": $timestamp,
-                 "status": "success",
-                 "build_history": $history
-               }' state.json > state.json.tmp && mv state.json.tmp state.json
-
-          AFTER_STATE_HASH="$(sha256sum state.json | awk '{print $1}')"
-          AFTER_PATCHES_HASH="$(sha256sum patches.json | awk '{print $1}')"
-          echo "state.json hash: ${BEFORE_STATE_HASH} -> ${AFTER_STATE_HASH}"
-          echo "patches.json hash: ${BEFORE_PATCHES_HASH} -> ${AFTER_PATCHES_HASH}"
-
-      - name: Commit state.json and patches.json
-        run: |
-          set -euo pipefail
-          git config user.name "GitHub Actions"
-          git config user.email "actions@github.com"
-
-          # Strip download_urls entries for pinned apps before committing config.json
-          PINNED_APPS="$(jq -r '[.patch_repos | to_entries[] | select(.value.pin_version != null and .value.pin_version != "") | .key]' config.json)"
-          if [ "$PINNED_APPS" != "[]" ] && [ -n "$PINNED_APPS" ]; then
-            echo "Stripping download_urls for pinned apps: $PINNED_APPS"
-            tmp_config=$(mktemp)
-            jq --argjson pinned "$PINNED_APPS" \
-              'if .download_urls then
-                .download_urls |= with_entries(select(.key as $k | ($pinned | index($k) | not)))
-               else . end' \
-              config.json > "$tmp_config"
-            mv "$tmp_config" config.json
-          fi
-
-          git add state.json patches.json config.json
-
-          if git diff --cached --quiet; then
-            echo "::error::No state/patches changes detected after update step; refusing silent success."
-            echo "Current state.json:"
-            cat state.json || true
-            exit 1
-          fi
-
-          git commit -m "chore: update state and patches config - cli ${{ needs.check-versions.outputs.cli-branch }}/${{ needs.check-versions.outputs.cli-version }}"
-
-          BRANCH_NAME="${GITHUB_REF_NAME:-main}"
-          for attempt in 1 2 3; do
-            if git push origin "HEAD:${BRANCH_NAME}"; then
-              echo "Pushed state updates to ${BRANCH_NAME}."
-              exit 0
-            fi
-
-            if [ "$attempt" -eq 3 ]; then
-              echo "::error::Failed to push state updates after ${attempt} attempts."
-              exit 1
-            fi
-
-            echo "Push rejected (attempt ${attempt}); rebasing on origin/${BRANCH_NAME} and retrying..."
-            # set +e: rebase may exit non-zero on conflict, which is
-            # fine — we'll detect that next iteration and skip our stale
-            # commit (the same version state has already been pushed by
-            # a concurrent run).
-            git fetch origin "${BRANCH_NAME}" || true
-            git rebase "origin/${BRANCH_NAME}" || {
-              rc=$?
-              echo "Rebase conflict (rc=${rc}); checking whether our state is already on origin..."
-              if ! git diff --cached --quiet; then
-                # We had a real change to push. If origin already has the
-                # same content (typical when a concurrent run pushed it
-                # first), drop our local commit and treat as success.
-                if git diff --quiet "origin/${BRANCH_NAME}" -- state.json patches.json config.json; then
-                  echo "origin/${BRANCH_NAME} already has identical state; dropping local commit."
-                  git rebase --abort || true
-                  echo "::notice::Skipped local state commit — origin was already up to date."
-                  exit 0
-                fi
-              fi
-              # Real conflict we can't auto-resolve — bail.
-              git rebase --abort || true
-              echo "::error::Rebase conflict; manual intervention required."
-              exit 1
-            }
-          done
+      - name: Commit and push state.json / patches.json / config.json
+        env:
+          BRANCH_NAME: ${{ github.ref_name }}
+          CLI_VERSION: ${{ needs.check-versions.outputs.cli-version }}
+          CLI_BRANCH: ${{ needs.check-versions.outputs.cli-branch }}
+        run: bash scripts/commit_state.sh
 
       - name: Prune stale GitHub Actions caches
         if: github.event_name != 'pull_request'
@@ -1640,10 +453,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
-          set -euo pipefail
-          echo "Listing and pruning stale project caches (keeping the in-use version + 1 backup)..."
-          # Cache pruning is best-effort — its failures (e.g. an old `gh`
-          # that doesn't recognize --yes) shouldn't fail the whole update-state
-          # step, which has already done the work the run needs.
-          node .github/scripts/cleanup-caches.js --apply || echo "::warning::Cache pruning had failures (see above); ignoring."
-          echo "Cache pruning complete."
+          # Best-effort: cache pruning failures must not fail the whole
+          # update-state step (the important work — committing the new
+          # state — already happened).
+          node .github/scripts/cleanup-caches.js --apply \
+            || echo "::warning::Cache pruning had failures (see above); ignoring."
