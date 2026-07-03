@@ -76,7 +76,7 @@ for app_name in "${APPS[@]}"; do
   version_str="$(printf '%s' "$apk_basename" | sed -E 's/^[^-]+-//')"
 
   TAG="${app_name}-${version_str}"
-  TITLE="${app_name} (${CLI_BRANCH}-${CLI_VERSION})"
+  TITLE="${app_name} (${version_str})"
 
   RELEASE_NOTES="$(printf '%s\n\n' \
     "${TITLE}" \
