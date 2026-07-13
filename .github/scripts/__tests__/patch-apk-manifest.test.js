@@ -18,33 +18,33 @@ describe('patch-apk-manifest CLI validation', () => {
     stderrSpy.mockRestore();
   });
 
-  test('rejects versionCode values above uint32 max', () => {
+  test('rejects versionCode values above Android signed 32-bit max', () => {
     expect(() => parseArgs([
       'node',
       'patch-apk-manifest.js',
       'in.apk',
       'out.apk',
       '--version-code',
-      '4294967296',
+      '2147483648',
     ])).toThrow('process.exit:1');
 
-    expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining('32-bit integer'));
+    expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining('Android signed 32-bit integer'));
   });
 
-  test('accepts values up to uint32 max', () => {
+  test('accepts the Android signed 32-bit max versionCode', () => {
     expect(parseArgs([
       'node',
       'patch-apk-manifest.js',
       'in.apk',
       'out.apk',
       '--version-code',
-      '4294967295',
+      '2147483647',
     ])).toMatchObject({
       input: 'in.apk',
       output: 'out.apk',
-      versionCode: 4294967295,
+      versionCode: 2147483647,
     });
 
-    expect(stderrSpy).not.toHaveBeenCalledWith(expect.stringContaining('32-bit integer'));
+    expect(stderrSpy).not.toHaveBeenCalledWith(expect.stringContaining('Android signed 32-bit integer'));
   });
 });

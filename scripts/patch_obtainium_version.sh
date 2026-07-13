@@ -95,13 +95,15 @@ fi
 INCREMENT="$(printf '%s' "$PATCH_TAG" | sed -E 's/^v//; s/[^0-9]+//g')"
 INCREMENT="$((INCREMENT % 10000 + 1))"
 
-NEW_VC=$((CURRENT_VC + INCREMENT))
-# The binary AXML stores versionCode as signed int32. If the sum exceeds
-# MAX_INT32 we wrap into the negative range. On API 28+ Android treats
-# versionCode as unsigned via getLongVersionCode(), so the wrapped value
-# compares higher than the original, which is what auto-updaters need.
-if [ "$NEW_VC" -gt 2147483647 ]; then
-  NEW_VC=$(( NEW_VC - 4294967296 ))
+MAX_VERSION_CODE=2147483647
+if [ "$CURRENT_VC" -ge "$MAX_VERSION_CODE" ]; then
+  NEW_VC="$MAX_VERSION_CODE"
+  log_warn "Current versionCode already at signed 32-bit max; patching versionName only."
+elif [ $((CURRENT_VC + INCREMENT)) -gt "$MAX_VERSION_CODE" ]; then
+  NEW_VC="$MAX_VERSION_CODE"
+  log_warn "versionCode bump would overflow; clamping to $MAX_VERSION_CODE."
+else
+  NEW_VC=$((CURRENT_VC + INCREMENT))
 fi
 log "  versionCode: $CURRENT_VC -> $NEW_VC"
 
@@ -119,7 +121,7 @@ node "$(dirname "$0")/../.github/scripts/patch-apk-manifest.js" \
 # below useful even when aapt can re-parse the patched AXML but the
 # regex doesn't match — that's still a patch failure, not a crash.
 VERIFIED="$(aapt dump badging "$MODIFIED_APK" 2>/dev/null \
-  | sed -nE "s/.*versionCode='(-?[0-9]+)' versionName='([^']+)'.*/\1 \2/p" | head -1)" \
+  | sed -nE "s/.*versionCode='([0-9]+)' versionName='([^']+)'.*/\1 \2/p" | head -1)" \
   || VERIFIED=""
 if [ -z "$VERIFIED" ]; then
   log_error "aapt dump badging failed for $MODIFIED_APK"
