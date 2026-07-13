@@ -51,7 +51,7 @@ const STRING_POOL_HEADER_SIZE = 28;
 const RES_CHUNK_HEADER_SIZE = 8;
 const ATTR_SIZE = 20;
 const NO_ENTRY = 0xFFFFFFFF;
-const MAX_ANDROID_VERSION_CODE = 0x7FFFFFFF;
+const MAX_ANDROID_VERSION_CODE = 0xFFFFFFFF; // max uint32 (accepts wrapped negative values)
 
 function fail(msg, code = 1) {
   process.stderr.write(`[patch-apk-manifest] ${msg}\n`);
@@ -79,8 +79,8 @@ function parseArgs(argv) {
     const a = argv[i];
     if (a === '--version-code' || a === '--versionCode') {
       const v = Number(argv[++i]);
-      if (!Number.isFinite(v) || v < 0 || v > MAX_ANDROID_VERSION_CODE) {
-        fail(`--version-code must be an Android signed 32-bit integer (0..${MAX_ANDROID_VERSION_CODE}), got: ${argv[i]}`);
+      if (!Number.isFinite(v) || v > MAX_ANDROID_VERSION_CODE) {
+        fail(`--version-code must be a 32-bit integer (0..${MAX_ANDROID_VERSION_CODE}), got: ${argv[i]}`);
       }
       opts.versionCode = v >>> 0;
     } else if (a === '--version-name' || a === '--versionName') {
