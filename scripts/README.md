@@ -16,7 +16,7 @@ scripts/
 │   ├── config.sh             config.json / patches.json / state.json helpers
 │   ├── github.sh             gh CLI wrappers + token checks
 │   ├── json.sh               jq-backed JSON access
-│   └── apk.sh                aapt / apksigner / zipalign helpers
+│   └── apk.sh                aapt / apksigner helpers
 ├── check_versions.sh         resolve latest Morphe + CLI tags; decide should-build
 ├── install_apkeep.sh         download apkeep binary
 ├── install_aapt.sh           install aapt + capture build-tools version
@@ -28,7 +28,6 @@ scripts/
 ├── prepare_target_version.sh gather inputs for download-supported-apk.js
 ├── prepare_keystore.sh       decode KEYSTORE_BASE64; produce BKS + PKCS12 keystores
 ├── patch_apk.sh              run morphe-cli patch; rename output for Obtainium
-├── patch_obtainium_version.sh rewrite versionCode/versionName; re-zipalign + re-sign
 ├── create_release.sh         publish per-app GitHub Releases
 ├── update_state.sh           rebuild state.json + sync patches.json
 └── commit_state.sh           commit + push state.json / patches.json / config.json

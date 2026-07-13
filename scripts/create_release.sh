@@ -76,7 +76,7 @@ for app_name in "${APPS[@]}"; do
   version_str="$(printf '%s' "$apk_basename" | sed -E 's/^[^-]+-//')"
 
   TAG="${app_name}-${version_str}"
-  TITLE="${app_name} (${version_str})"
+  TITLE="${app_name} ${version_str}"
 
   RELEASE_NOTES="$(printf '%s\n\n' \
     "${TITLE}" \
@@ -90,9 +90,6 @@ for app_name in "${APPS[@]}"; do
     "Add source: GitHub" \
     "" \
     "- **Release tag filter:** \`^${app_name}\`" \
-    "- **APK filter:** \`^${app_name}-v.*\\.apk\$\`" \
-    "" \
-    "**Note:** The \`-v\` infix in the APK filter is required to distinguish from other APK files." \
   )"
 
   if gh release view "$TAG" >/dev/null 2>&1; then

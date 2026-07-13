@@ -160,9 +160,9 @@ Each app gets its own release:
 
 | App | Release Name | APK File |
 |-----|--------------|----------|
-| YouTube | `youtube-v<base>-<patches>` | `youtube-v20.44.38-v1.24.0-dev.8.apk` |
-| YouTube Music | `ytmusic-v<base>-<patches>` | `ytmusic-v8.44.54-v1.24.0-dev.8.apk` |
-| Reddit | `reddit-v<base>-<patches>` | `reddit-v2025.02.17-v1.24.0-dev.8.apk` |
+| YouTube | `youtube v<base>-<patches>` | `youtube-v20.44.38-v1.24.0-dev.8.apk` |
+| YouTube Music | `ytmusic v<base>-<patches>` | `ytmusic-v8.44.54-v1.24.0-dev.8.apk` |
+| Reddit | `reddit v<base>-<patches>` | `reddit-v2025.02.17-v1.24.0-dev.8.apk` |
 
 ### GitHub Actions Artifacts
 Same files available as workflow artifacts.
@@ -181,12 +181,6 @@ Create **3 separate entries** (same repo, different filters per app).
    - YouTube: `^youtube`
    - YouTube Music: `^ytmusic`
    - Reddit: `^reddit`
-4. **APK Filter** (regex):
-   - YouTube: `^youtube-v.*\.apk$`
-   - YouTube Music: `^ytmusic-v.*\.apk$`
-   - Reddit: `^reddit-v.*\.apk$`
-
-> ⚠️ **Important**: Both filters are **required** for each entry!
 
 ---
 

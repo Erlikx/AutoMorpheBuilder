@@ -41,9 +41,9 @@ Each app gets its own GitHub Release:
 ```
 
 **Examples:**
-- `youtube-v20.44.38-v1.24.0-dev.8`
-- `ytmusic-v8.44.54-v1.24.0-dev.8`
-- `reddit-v2025.02.17-v1.24.0-dev.8`
+- `youtube v20.44.38-v1.24.0-dev.8`
+- `ytmusic v8.44.54-v1.24.0-dev.8`
+- `reddit v2025.02.17-v1.24.0-dev.8`
 
 ### Obtainium Setup
 Create **one entry per app** with these settings:
@@ -55,13 +55,11 @@ Create **one entry per app** with these settings:
 
 **Filters per app:**
 
-| App | Release Tag Filter | APK Filter |
-|-----|-------------------|------------|
-| YouTube | `^youtube` | `^youtube-v.*\.apk$` |
-| YouTube Music | `^ytmusic` | `^ytmusic-v.*\.apk$` |
-| Reddit | `^reddit` | `^reddit-v.*\.apk$` |
-
-> ⚠️ **Important**: Both filters are required! The `-v` infix in APK filter is mandatory.
+| App | Release Tag Filter |
+|-----|-------------------|
+| YouTube | `^youtube` |
+| YouTube Music | `^ytmusic` |
+| Reddit | `^reddit` |
 
 ---
 
@@ -229,8 +227,7 @@ Verify:
 3. `KEY_PASSWORD` is set if key password differs
 
 ### ❌ Obtainium not finding updates
-- Use correct filename regex filters (see [Obtainium Setup](#obtainium-setup))
-- Ensure both Release Tag Filter AND APK Filter are set
+- Use correct Release Tag Filter regex (see [Obtainium Setup](#obtainium-setup))
 
 ---
 

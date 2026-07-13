@@ -369,20 +369,6 @@ jobs:
           RUNNER_TEMP: ${{ runner.temp }}
         run: bash scripts/patch_apk.sh
 
-      - name: Patch APK version for Obtainium
-        if: success()
-        env:
-          APK: ${{ steps.patch.outputs.output }}
-          APK_VERSION: ${{ steps.getapk.outputs.version }}
-          PATCH_TAG: ${{ matrix.patchTag }}
-          KEYSTORE_FILE: ${{ steps.keystore.outputs.p12_path }}
-          KEY_ALIAS: ${{ steps.keystore.outputs.alias }}
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-          OUT_DIR: ${{ env.OUT_DIR }}
-          RUNNER_TEMP: ${{ runner.temp }}
-        run: bash scripts/patch_obtainium_version.sh
-
       - name: Upload patched ${{ matrix.name }}
         uses: actions/upload-artifact@v7
         with:
