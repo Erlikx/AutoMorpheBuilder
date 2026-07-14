@@ -50,10 +50,10 @@ mkdir -p "$TOOLS_DIR"
 
 if [ ! -f "$TOOLS_DIR/morphe-cli.jar" ]; then
   log "Downloading morphe-cli ${CLI_TAG}..."
-  gh_release_download "$CLI_REPO" "$CLI_TAG" "*.jar" "$TOOLS_DIR" || true
-  # The release asset name varies (morphe-cli-X.Y.Z-all.jar, etc.).
-  # Rename whatever jar landed to the canonical name.
-  for f in "$TOOLS_DIR"/*.jar; do
+  # v1.11.0 renamed the project to "Morphe Desktop" so the release
+  # asset is morphe-desktop-X.Y.Z-all.jar; accept either name.
+  gh_release_download "$CLI_REPO" "$CLI_TAG" "morphe-cli-*-all.jar" "$TOOLS_DIR" || true
+  for f in "$TOOLS_DIR"/morphe-cli-*-all.jar "$TOOLS_DIR"/morphe-desktop-*-all.jar; do
     [ -f "$f" ] || continue
     if [ "$f" != "$TOOLS_DIR/morphe-cli.jar" ]; then
       mv "$f" "$TOOLS_DIR/morphe-cli.jar"

@@ -71,7 +71,18 @@ with_retry 3 5 curl -fsSL \
 # --- morphe-cli.jar ------------------------------------------------------
 
 if [ ! -f "$TOOLS_DIR/morphe-cli.jar" ]; then
-  gh_release_download "MorpheApp/morphe-cli" "$CLI_VERSION" "morphe-cli-*-all.jar" "$TOOLS_DIR" >/dev/null
+  gh_release_download "MorpheApp/morphe-cli" "$CLI_VERSION" "morphe-cli-*-all.jar" "$TOOLS_DIR" >/dev/null || true
+  if [ ! -f "$TOOLS_DIR/morphe-cli.jar" ]; then
+    gh_release_download "MorpheApp/morphe-cli" "$CLI_VERSION" "morphe-desktop-*-all.jar" "$TOOLS_DIR" >/dev/null || true
+  fi
+  for f in "$TOOLS_DIR"/morphe-cli-*-all.jar "$TOOLS_DIR"/morphe-desktop-*-all.jar; do
+    [ -f "$f" ] || continue
+    if [ "$f" != "$TOOLS_DIR/morphe-cli.jar" ]; then
+      mv "$f" "$TOOLS_DIR/morphe-cli.jar"
+      log "  moved $(basename "$f") -> morphe-cli.jar"
+    fi
+    break
+  done
 fi
 
 # --- APKEditor ----------------------------------------------------------

@@ -309,8 +309,8 @@ jobs:
           set -euo pipefail
           slug="$(printf '%s' "$PATCH_REPO" | tr '/' '-')"
           mpp="$TOOLS_DIR/${slug}.mpp"
-          jar="$(ls -1 "$TOOLS_DIR"/morphe-cli-*-all.jar 2>/dev/null | head -n1 || true)"
-          if [ -z "$jar" ] || [ ! -f "$mpp" ]; then
+          jar="$TOOLS_DIR/morphe-cli.jar"
+          if [ ! -f "$jar" ] || [ ! -f "$mpp" ]; then
             echo "::error::morphe-cli jar or $mpp missing"
             exit 1
           fi
