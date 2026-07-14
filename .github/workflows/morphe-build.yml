@@ -291,7 +291,7 @@ jobs:
           TOOLS_DIR: ${{ env.TOOLS_DIR }}
         run: bash scripts/fetch_morphe_tools.sh
 
-      - name: Prepare inputs for resolve + download
+      - name: Prepare inputs for download
         id: targetver_prep
         env:
           APP_ID: ${{ matrix.appId }}
@@ -305,8 +305,28 @@ jobs:
           PATCH_REPO: ${{ matrix.patchRepo }}
           TOOLS_DIR: ${{ env.TOOLS_DIR }}
           PINNED_VERSION: ${{ steps.targetver_prep.outputs.pinned }}
-          DISABLED_PATCHES_JSON: ${{ steps.targetver_prep.outputs.disabled }}
-        run: node "$GITHUB_WORKSPACE/.github/scripts/resolve-supported-version.js"
+        run: |
+          set -euo pipefail
+          slug="$(printf '%s' "$PATCH_REPO" | tr '/' '-')"
+          mpp="$TOOLS_DIR/${slug}.mpp"
+          jar="$(ls -1 "$TOOLS_DIR"/morphe-cli-*-all.jar 2>/dev/null | head -n1 || true)"
+          if [ -z "$jar" ] || [ ! -f "$mpp" ]; then
+            echo "::error::morphe-cli jar or $mpp missing"
+            exit 1
+          fi
+          if [ -n "$PINNED_VERSION" ] && [ "$PINNED_VERSION" != "null" ]; then
+            version="$PINNED_VERSION"
+          else
+            version="$(java -jar "$jar" list-versions -f "$APP_ID" --patches="$mpp" \
+              | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)"
+          fi
+          if [ -z "$version" ]; then
+            echo "::error::Could not resolve a Morphe-supported version for $APP_ID"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "versions=$version" >> "$GITHUB_OUTPUT"
+          echo "Selected version for $APP_ID: $version"
 
       - name: Cache APK for ${{ matrix.appId }}
         id: cache-apk
