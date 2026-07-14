@@ -6,25 +6,10 @@
     }
   },
   "cli_branch": "main",
-  "cli_version": "v1.9.1",
-  "last_build": "2026-07-13T20:12:25Z",
+  "cli_version": "v1.11.0",
+  "last_build": "2026-07-14T17:14:17Z",
   "status": "success",
   "build_history": [
-    {
-      "timestamp": "2026-05-03T16:21:08Z",
-      "patches": {
-        "MorpheApp/morphe-patches": {
-          "branch": "main",
-          "version": "v1.25.0"
-        }
-      },
-      "cli_version": "v1.7.0",
-      "cli_branch": "main",
-      "status": "success",
-      "run_id": "25284260053",
-      "run_number": 218,
-      "commit": "0b9b9be9699dd4a54ff86c745315cbb54ba1f4a6"
-    },
     {
       "timestamp": "2026-05-03T17:13:09Z",
       "patches": {
@@ -459,6 +444,21 @@
       "run_id": "29281142118",
       "run_number": 345,
       "commit": "fe71f21b39fb73bf6f1badc70f7aee8533a9c9e3"
+    },
+    {
+      "timestamp": "2026-07-14T17:14:17Z",
+      "patches": {
+        "MorpheApp/morphe-patches": {
+          "branch": "main",
+          "version": "v1.34.0"
+        }
+      },
+      "cli_version": "v1.11.0",
+      "cli_branch": "main",
+      "status": "success",
+      "run_id": "29352498259",
+      "run_number": 352,
+      "commit": "13734e20cd03eeaea44e922b8e98d6af1a5a2762"
     }
   ]
 }
