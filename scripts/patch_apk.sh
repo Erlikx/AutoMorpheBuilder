@@ -161,7 +161,7 @@ run_patch() {
 build_patch_cmd() {
   local -a cmd=(java -jar "$JAR" patch --patches="$MPP")
   cmd+=("${KEY_ARGS[@]}")
-  cmd+=(--temporary-files-path="$PATCH_TMP_DIR" --purge)
+  cmd+=(--temporary-files-path="$PATCH_TMP_DIR")
   cmd+=(--out="$PATCHED_APK")
   cmd+=("${PATCH_ARGS[@]}")
   cmd+=("$APK")
