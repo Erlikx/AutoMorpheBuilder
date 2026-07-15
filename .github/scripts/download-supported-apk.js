@@ -59,6 +59,7 @@ const {
   findBundleInDir,
   listApkAbis,
 } = require('./apk-selection');
+const { validateDownloadedApkAbi } = require('./apk-abi-validator');
 
 const APP_ID = process.env.APP_ID;
 const TARGET_VERSION = process.env.TARGET_VERSION || '';
@@ -303,11 +304,43 @@ ensureDir(APKS_DIR);
 
 let downloadSuccess = false;
 
+/**
+ * Return true if `filePath` is OK to use as-is (either no preferred
+ * arch is configured, or the file actually ships the arch's .so libs).
+ * Returns false on any failure — caller should drop the file and let
+ * the next download path produce a fresh one.
+ *
+ * Wraps validateDownloadedApkAbi (which throws on missing arch) so
+ * cache-hit code paths can decide whether to keep the cached file.
+ */
+function cachedFileHasPreferredAbi(filePath) {
+  const arch = loadPreferredArch();
+  if (!arch) return true;
+  try {
+    validateDownloadedApkAbi(filePath, arch);
+    return true;
+  } catch (e) {
+    console.log(`::warning::Cached file ${path.basename(filePath)} rejected: ${e.message}`);
+    return false;
+  }
+}
+
 // 1. Check for cached APK matching target version
 const cached = findCachedApk(APKS_DIR, TARGET_VERSION);
 if (cached) {
-  console.log(`Using cached APK: ${cached} (v${TARGET_VERSION})`);
-  downloadSuccess = true;
+  // Cached files survive across builds via actions/cache@v5 keyed by
+  // apk-<appId>-<version>. Files written BEFORE the download-side ABI
+  // validation (commit c855306) can be 32-bit-only and would sail
+  // through this cache hit into the ABI guardrail at the end of this
+  // script, hard-failing the build. Validate the cache contents the
+  // same way the live downloader would.
+  if (cachedFileHasPreferredAbi(cached)) {
+    console.log(`Using cached APK: ${cached} (v${TARGET_VERSION})`);
+    downloadSuccess = true;
+  } else {
+    console.log(`Discarding bad cached APK (missing ${loadPreferredArch() || 'preferred-arch'} libs) — will re-download.`);
+    try { fs.unlinkSync(cached); } catch { /* ignore */ }
+  }
 } else {
   // Clear stale files in APKS_DIR (preserves nothing for this run).
   try {
@@ -326,9 +359,20 @@ if (!downloadSuccess) {
 
   const preloaded = findCachedApk(TOOLS_DIR, TARGET_VERSION);
   if (preloaded) {
-    console.log(`Using pre-downloaded APK from check-versions: ${preloaded} (matches v${TARGET_VERSION})`);
-    fs.copyFileSync(preloaded, path.join(APKS_DIR, path.basename(preloaded)));
-    downloadSuccess = true;
+    // Same ABI validation as the APKS_DIR cache above. The
+    // pre-downloaded file was produced by pre_download_apks.sh, which
+    // runs unified-downloader.js (and would normally have caught a
+    // 32-bit-only APK at download time) — but the artifact cache can
+    // outlive a deploy by up to 1 day (see
+    // actions/upload-artifact@v7 retention-days: 1 in morphe-build.yml).
+    if (cachedFileHasPreferredAbi(preloaded)) {
+      console.log(`Using pre-downloaded APK from check-versions: ${preloaded} (matches v${TARGET_VERSION})`);
+      fs.copyFileSync(preloaded, path.join(APKS_DIR, path.basename(preloaded)));
+      downloadSuccess = true;
+    } else {
+      console.log(`Discarding bad pre-downloaded APK — will re-download via unified-downloader.`);
+      try { fs.unlinkSync(preloaded); } catch { /* ignore */ }
+    }
   } else {
     console.log(`No matching APK found for v${TARGET_VERSION}, using unified-downloader...`);
     const dl = runUnifiedDownloader(APP_ID, TARGET_VERSION, APKS_DIR);
