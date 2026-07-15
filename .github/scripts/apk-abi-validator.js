@@ -25,15 +25,60 @@ const { execFileSync } = require('node:child_process');
 const { apkHasNativeLibsForArch } = require('./apk-selection');
 
 /**
+ * Inspect the zip at `filePath` and decide whether it's a single APK
+ * or a bundle (zip-of-zips with inner .apk entries). Returns:
+ *   'apk'       — file has lib/* or AndroidManifest.xml at top level
+ *   'bundle'    — file has inner .apk entries (apks / apkm / xapk shape)
+ *   'unknown'   — non-zip, empty, or unrecognizable
+ *
+ * Content-based detection matters because upstream sources sometimes
+ * mislabel the extension: APKMirror's apkm-pw flow saves bundle files
+ * with whatever filename the server's Content-Disposition sets, and
+ * Reddit's variant downloads come back with a `.apk` filename even
+ * though the contents are a zip-of-zips. Extension-based dispatch
+ * would treat such a bundle as a single APK, run lib/<arch>/*.so
+ * detection on it, find no top-level native libs, and reject it —
+ * even though the bundle's inner base.apk / split_config.*.apk files
+ * DO contain the right ABIs and would merge into a universal APK.
+ */
+function detectApkShape(filePath) {
+  try {
+    const out = execFileSync('unzip', ['-Z1', filePath], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const lines = out.split('\n');
+    let hasInnerApk = false;
+    let hasTopLevelLib = false;
+    let hasManifest = false;
+    for (const line of lines) {
+      if (!line) continue;
+      // Inner .apk → bundle
+      if (line.toLowerCase().endsWith('.apk')) { hasInnerApk = true; continue; }
+      // Top-level lib/<arch>/ → single APK with native libs
+      if (/^lib\/[^/]+\//.test(line)) { hasTopLevelLib = true; continue; }
+      // AndroidManifest.xml at top level → single APK (signature)
+      if (line === 'AndroidManifest.xml') { hasManifest = true; continue; }
+    }
+    if (hasInnerApk && !hasTopLevelLib && !hasManifest) return 'bundle';
+    if (hasTopLevelLib || hasManifest) return 'apk';
+    return 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+/**
  * Reject a freshly-downloaded APK/bundle that lacks libs for the
  * preferred architecture. Throws on failure; no-op otherwise.
  *
- * Handles three shapes:
- *   .apk       direct ABI inspection (lib/<arch>/*.so) via unzip -Z1
- *   .xapk/.apkm/.apks   extract to a temp dir; OK if ANY inner .apk
- *                       contains lib/<arch>/*.so (the merge step will
- *                       combine all of them)
- *   anything else   trust the upstream (no validation)
+ * Detection is content-based (not extension-based): the same helper
+ * inspects the zip's top-level entries and decides whether it's a
+ * single APK or a bundle. APKMirror's apkm-pw flow commonly saves a
+ * BUNDLE-shaped file (zip-of-zips with inner .apk entries) under a
+ * `.apk` filename when the upstream Content-Disposition names the
+ * file that way; extension-based dispatch would then mis-validate
+ * the bundle as a single APK and reject it for "missing lib/<arch>".
  *
  * Non-zip files (HTML error pages, partial downloads, test fixtures
  * that are just bytes) are silently skipped — `unzip -Z1` would error
@@ -44,7 +89,7 @@ const { apkHasNativeLibsForArch } = require('./apk-selection');
  *
  * @param {string} filePath Path to the downloaded APK / XAPK / APKM / APKS.
  * @param {string|undefined} preferredArch e.g. "arm64-v8a"; empty/undefined means no filter.
- * @throws {Error} If the file is a plain .apk (or a bundle) missing the preferred arch's .so.
+ * @throws {Error} If the file is genuinely missing the preferred arch's .so.
  */
 function validateDownloadedApkAbi(filePath, preferredArch) {
   if (!preferredArch) return;
@@ -65,8 +110,9 @@ function validateDownloadedApkAbi(filePath, preferredArch) {
     return;
   }
 
-  const lower = filePath.toLowerCase();
-  if (lower.endsWith('.apk')) {
+  const shape = detectApkShape(filePath);
+  if (shape === 'unknown') return; // Trust upstream; download-supported-apk.js's post-merge guardrail is the safety net.
+  if (shape === 'apk') {
     if (!apkHasNativeLibsForArch(filePath, preferredArch)) {
       throw new Error(
         `Downloaded APK ${path.basename(filePath)} is missing ` +
@@ -77,37 +123,34 @@ function validateDownloadedApkAbi(filePath, preferredArch) {
     return;
   }
 
-  if (lower.endsWith('.xapk') || lower.endsWith('.apkm') || lower.endsWith('.apks')) {
-    // Bundle: extract to temp dir, check each inner .apk. We can't simply
-    // look for split_config.<arch>.apk in the listing because (a) the
-    // arch can be encoded with or without dashes (arm64-v8a vs
-    // arm64_v8a), (b) some bundles ship the preferred arch only inside
-    // base.apk, and (c) filename conventions drift. Extraction + the
-    // same zip-listing helper used for plain APKs is the most reliable.
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'abi_check_'));
+  // shape === 'bundle': extract to temp dir, check each inner .apk.
+  // We can't simply look for split_config.<arch>.apk in the listing
+  // because (a) the arch can be encoded with or without dashes
+  // (arm64-v8a vs arm64_v8a), (b) some bundles ship the preferred
+  // arch only inside base.apk, and (c) filename conventions drift.
+  // Extraction + the same zip-listing helper used for plain APKs is
+  // the most reliable.
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'abi_check_'));
+  try {
     try {
-      try {
-        execFileSync('unzip', ['-q', '-o', filePath, '-d', tmpDir], { stdio: 'ignore' });
-      } catch {
-        // Extraction failed (corrupt bundle, unsupported format, etc.).
-        // Trust the upstream — download-supported-apk.js's post-merge
-        // ABI guardrail will catch this if it's actually broken.
-        return;
-      }
-      const inner = fs.readdirSync(tmpDir).filter((f) => f.toLowerCase().endsWith('.apk'));
-      for (const apk of inner) {
-        if (apkHasNativeLibsForArch(path.join(tmpDir, apk), preferredArch)) return;
-      }
-      throw new Error(
-        `Downloaded bundle ${path.basename(filePath)} has no split containing ` +
-        `lib/${preferredArch}/*.so. Falling back to next download source.`,
-      );
-    } finally {
-      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
+      execFileSync('unzip', ['-q', '-o', filePath, '-d', tmpDir], { stdio: 'ignore' });
+    } catch {
+      // Extraction failed (corrupt bundle, unsupported format, etc.).
+      // Trust the upstream — download-supported-apk.js's post-merge
+      // ABI guardrail will catch this if it's actually broken.
+      return;
     }
+    const inner = fs.readdirSync(tmpDir).filter((f) => f.toLowerCase().endsWith('.apk'));
+    for (const apk of inner) {
+      if (apkHasNativeLibsForArch(path.join(tmpDir, apk), preferredArch)) return;
+    }
+    throw new Error(
+      `Downloaded bundle ${path.basename(filePath)} has no split containing ` +
+      `lib/${preferredArch}/*.so. Falling back to next download source.`,
+    );
+  } finally {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
   }
-  // Unknown extension — trust the upstream; download-supported-apk.js's
-  // post-merge ABI guardrail will catch this if it's actually broken.
 }
 
-module.exports = { validateDownloadedApkAbi };
+module.exports = { validateDownloadedApkAbi, detectApkShape };

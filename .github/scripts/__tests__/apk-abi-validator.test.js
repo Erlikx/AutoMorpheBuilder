@@ -104,4 +104,37 @@ describe('validateDownloadedApkAbi', () => {
     // documents the actual behavior: missing libs => throw.
     expect(() => validateDownloadedApkAbi(apk, 'arm64-v8a')).toThrow(/missing/);
   });
+
+  // Regression guard: APKMirror's apkm-pw flow saves BUNDLE-shaped
+  // files (zip-of-zips with inner .apk entries) under whatever filename
+  // the upstream Content-Disposition sets — frequently `.apk`. The old
+  // extension-based dispatch mis-identified such a bundle as a single
+  // APK and rejected it for "missing lib/<arch>/*.so" (because the
+  // bundle's native libs live inside base.apk / split_config.*.apk,
+  // not at the zip top level). The fix inspects the zip contents to
+  // decide whether the file is a single APK or a bundle, regardless
+  // of the on-disk extension.
+  test('accepts a bundle even when its filename uses .apk extension (content-based detection)', () => {
+    if (!zipAvailable()) { console.warn('skipping: no zip'); return; }
+
+    // Build a fake bundle with arm64-v8a inside base.apk.
+    const bundleDir = path.join(tmp, 'inner');
+    fs.mkdirSync(bundleDir, { recursive: true });
+    fs.mkdirSync(path.join(bundleDir, 'lib', 'arm64-v8a'), { recursive: true });
+    fs.writeFileSync(path.join(bundleDir, 'lib', 'arm64-v8a', 'libfoo.so'), 'fake');
+    fs.writeFileSync(path.join(bundleDir, 'classes.dex'), 'fake');
+    execFileSync('zip', [path.join(bundleDir, 'base.apk')], { stdio: 'ignore' });
+    execFileSync('zip', ['-j', path.join(bundleDir, 'base.apk'), path.join(bundleDir, 'lib', 'arm64-v8a', 'libfoo.so')], { stdio: 'ignore' });
+    execFileSync('zip', ['-j', path.join(bundleDir, 'base.apk'), path.join(bundleDir, 'classes.dex')], { stdio: 'ignore' });
+
+    // Wrap base.apk in an outer .apk (mimicking APKMirror's mislabel).
+    const bundlePath = path.join(tmp, 'fake_bundle_named_apk.apk');
+    execFileSync('zip', [bundlePath], { stdio: 'ignore' });
+    execFileSync('zip', ['-j', bundlePath, path.join(bundleDir, 'base.apk')], { stdio: 'ignore' });
+
+    // This must NOT throw — content-based detection sees the inner
+    // .apk and routes through the bundle branch, which extracts and
+    // finds arm64-v8a inside base.apk.
+    expect(() => validateDownloadedApkAbi(bundlePath, 'arm64-v8a')).not.toThrow();
+  });
 });
