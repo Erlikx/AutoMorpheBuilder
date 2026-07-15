@@ -143,6 +143,83 @@ function apkHasDex(apk) {
   }
 }
 
+/**
+ * Returns true if `apk` ships at least one .so file under `lib/<arch>/`.
+ * Used to catch the BUNDLE-merge-fell-back-to-base.apk failure mode where
+ * a base APK only declares armeabi-v7a and the arm64-v8a / x86_64 splits
+ * get dropped on the floor — the resulting APK then silently fails to
+ * install on arm64-v8a-only devices (GrapheneOS, modern Pixels).
+ *
+ * If `arch` is empty/falsy the function returns true (no ABI filter).
+ * The arch string is regex-escaped so values like "arm64-v8a" are safe.
+ */
+function apkHasNativeLibsForArch(apk, arch) {
+  if (!arch) return true;
+  const safe = String(arch).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  try {
+    const out = execFileSync('unzip', ['-Z1', apk], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    return new RegExp(`^lib/${safe}/[^/]+\\.so$`, 'm').test(out);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Find any split-package bundle (.xapk / .apkm / .apks) sitting in
+ * `dir`. Returns the absolute path of the first match, or null. BUNDLE/APK
+ * sets always need merging — a single-arm .apk candidate would silently
+ * drop other architectures, so callers should prefer the bundle when one
+ * coexists with a single-arm .apk in the download directory.
+ *
+ * Order of preference (first match wins): .xapk, .apkm, .apks. These are
+ * alphabetical, but in practice each app downloads exactly one of these
+ * per build (the downloader's variant priorities pick exactly one).
+ *
+ * @param {string} dir Directory to scan (one level deep — recursive scan
+ *                     would surprise callers; split packages live in
+ *                     APKS_DIR, not in nested subdirs).
+ * @returns {string|null} Absolute path of the bundle, or null.
+ */
+function findBundleInDir(dir) {
+  if (!fs.existsSync(dir)) return null;
+  let entries;
+  try {
+    entries = fs.readdirSync(dir);
+  } catch {
+    return null;
+  }
+  for (const ext of ['xapk', 'apkm', 'apks']) {
+    for (const f of entries) {
+      if (f.toLowerCase().endsWith('.' + ext)) return path.join(dir, f);
+    }
+  }
+  return null;
+}
+
+/**
+ * Return the deduped, sorted list of ABI directory names embedded in
+ * `apk` (one per unique `lib/<abi>/`). Empty list if the APK has no
+ * native libs (pure-Java app, dex-only split, etc.) or on any error.
+ * Used for post-merge logging and the BUNDLE-vs-.apk preference logic.
+ *
+ * @param {string} apk Absolute path to an APK/XAPK/APKM/APKS.
+ * @returns {string[]} Sorted ABI directory names (e.g. ['arm64-v8a',
+ *                    'armeabi-v7a', 'x86_64']). May be empty.
+ */
+function listApkAbis(apk) {
+  try {
+    const out = execFileSync('unzip', ['-Z1', apk], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    const abis = new Set();
+    for (const line of out.split('\n')) {
+      const m = line.match(/^lib\/([^/]+)\//);
+      if (m) abis.add(m[1]);
+    }
+    return [...abis].sort();
+  } catch {
+    return [];
+  }
+}
+
 module.exports = {
   extractVersionFromString,
   scoreApk,
@@ -150,4 +227,7 @@ module.exports = {
   findPackageCandidate,
   bestRankedApkInDir,
   apkHasDex,
+  apkHasNativeLibsForArch,
+  findBundleInDir,
+  listApkAbis,
 };

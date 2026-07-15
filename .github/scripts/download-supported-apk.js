@@ -21,7 +21,10 @@
  *      morphe-cli list-versions, retry with the head of that list.
  *
  * Then: aapt-validate, score-rank candidate, merge split packages
- * (APKEditor first, manual extract as fallback), and require classes.dex.
+ * (APKEditor required — no silent fallback to base.apk-only, which would
+ * drop arm64-v8a / x86_64 native libs and silently break install on
+ * 64-bit-only devices), require classes.dex, and enforce the
+ * preferred_arch ABI guardrail when config.json sets one.
  *
  * Inputs (env vars):
  *   APP_ID         required  package id
@@ -52,6 +55,9 @@ const {
   findPackageCandidate,
   bestRankedApkInDir,
   apkHasDex,
+  apkHasNativeLibsForArch,
+  findBundleInDir,
+  listApkAbis,
 } = require('./apk-selection');
 
 const APP_ID = process.env.APP_ID;
@@ -189,6 +195,15 @@ function readApkVersion(apkPath) {
 /**
  * Merge a split package with APKEditor. Returns true on success (writes
  * `outApk`), false otherwise. Mirrors merge_split_package_with_apkeditor.
+ *
+ * Flags:
+ *   -clean-meta   Strips the META-INF signature block before re-emit.
+ *                 morphe-cli re-signs the merged APK anyway, and the
+ *                 original signature is for the per-split contents —
+ *                 leaving it in place has caused post-merge install
+ *                 failures on some downstream tools. Always safe; the
+ *                 cost is one extra pass over the bundle's signature
+ *                 entries.
  */
 function mergeSplitPackageWithApkeditor(splitPkg, outApk) {
   if (!APKEDITOR_JAR || !fs.existsSync(APKEDITOR_JAR)) {
@@ -200,7 +215,7 @@ function mergeSplitPackageWithApkeditor(splitPkg, outApk) {
   console.error(`Merging split package with APKEditor: ${splitPkg}`);
   let r;
   try {
-    r = spawnSync('java', ['-jar', APKEDITOR_JAR, 'm', '-i', splitPkg, '-o', outApk], {
+    r = spawnSync('java', ['-jar', APKEDITOR_JAR, 'm', '-clean-meta', '-i', splitPkg, '-o', outApk], {
       encoding: 'utf8', stdio: ['ignore', fs.openSync(mergeLog, 'w'), fs.openSync(mergeLog, 'a')],
     });
   } catch (e) {
@@ -224,6 +239,15 @@ function mergeSplitPackageWithApkeditor(splitPkg, outApk) {
     console.error(`APKEditor output has no classes.dex: ${outApk}`);
     return false;
   }
+  // Post-merge diagnostics: log which ABIs the merge actually emitted.
+  // If a split slipped through despite our best efforts, this is the line
+  // that tells the maintainer which arch went missing. The source bundle
+  // is a zip-of-zips (lib/ entries live inside the per-arch .apk splits,
+  // not at the top level), so a direct comparison isn't possible without
+  // extracting it; log the output and rely on the ABI guardrail below
+  // to hard-fail when the preferred arch is missing.
+  const mergedAbis = listApkAbis(outApk);
+  console.log(`::debug::Merged APK ABIs: ${mergedAbis.length ? mergedAbis.join(', ') : '(none — pure-Java app?)'}`);
   return true;
 }
 
@@ -234,6 +258,43 @@ function findFirstFile(dir, suffix) {
     if (f.endsWith(suffix)) return path.join(dir, f);
   }
   return null;
+}
+
+/**
+ * Read `preferred_arch` from config.json. Mirrors `loadConfig()` in
+ * unified-downloader.js — keeps the script independent of the caller.
+ * Empty string means "no preference" (skip the ABI guardrail).
+ *
+ * Env override: $PREFERRED_ARCH wins if set, so tests/CI can pin it
+ * without rewriting config.json.
+ */
+function loadPreferredArch() {
+  if (process.env.PREFERRED_ARCH) return process.env.PREFERRED_ARCH;
+  const configPath = path.join(process.cwd(), 'config.json');
+  if (!fs.existsSync(configPath)) return '';
+  try {
+    const cfg = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    return cfg.preferred_arch || '';
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Best-effort dump of the APK's `native-code:` line from aapt badging,
+ * for the guardrail error message. Returns '' on any failure.
+ */
+function readApkNativeCode(apkPath) {
+  for (const bin of ['aapt', 'aapt2']) {
+    try {
+      const out = execFileSync(bin, ['dump', 'badging', apkPath], {
+        encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      const line = out.split('\n').find(l => l.startsWith('native-code:'));
+      return line ? line.trim() : '';
+    } catch { /* try next */ }
+  }
+  return '';
 }
 
 // === Main ===
@@ -407,6 +468,40 @@ if (!fs.existsSync(apkCandidate)) {
 }
 console.log(`Found package in ${APKS_DIR}: ${apkCandidate}`);
 
+// 6b. BUNDLE-vs-single-APK preference. `findPackageCandidate` scores a
+//     plain `.apk` higher than a `.xapk`/`.apkm`/`.apks` (2000 vs 500)
+//     because a .apk is ready-to-patch and skips the merge step. But that
+//     scoring is purely filename-based: it doesn't know whether the .apk
+//     is universal or single-arm. When both a single-arm .apk AND a
+//     bundle are in APKS_DIR (e.g. apkeep produced an armeabi-v7a APK
+//     and the apkmirror fallback downloaded a universal bundle on the
+//     same run, or stale files from a previous build coexist with this
+//     run's download), the .apk wins and the merge step is silently
+//     skipped. The resulting build ships a single-architecture APK.
+//
+//     Fix: when the chosen .apk is missing the preferred architecture's
+//     .so libs AND a bundle is also available, prefer the bundle. The
+//     bundle is by definition multi-arch after merge. This preserves
+//     the existing fast-path for genuine universal .apks (they keep the
+//     +800 arm64 bonus and skip the merge entirely).
+const preferredArchEarly = loadPreferredArch();
+const bundleInDir = findBundleInDir(APKS_DIR);
+if (
+  apkCandidate.endsWith('.apk') &&
+  bundleInDir &&
+  preferredArchEarly &&
+  !apkHasNativeLibsForArch(apkCandidate, preferredArchEarly)
+) {
+  const candidateAbis = listApkAbis(apkCandidate);
+  console.log(
+    `::warning::Single-arm APK ${path.basename(apkCandidate)} ` +
+    `(ABIs: ${candidateAbis.join(', ') || 'none'}) is missing ` +
+    `libs for preferred architecture '${preferredArchEarly}'. ` +
+    `Switching to bundle ${path.basename(bundleInDir)} for universal merge.`,
+  );
+  apkCandidate = bundleInDir;
+}
+
 // 7. If the candidate is an APK without classes.dex, try to swap to a
 //    dex-bearing APK from the same directory; failing that, fall back
 //    to the first split package (which will be merged next).
@@ -445,43 +540,28 @@ if (/\.(xapk|apkm|apks)$/.test(apkCandidate)) {
     }
     finalApk = outApk;
   } else {
-    console.log('APKEditor merge failed; falling back to direct APK extraction.');
-    const xapkTmp = fs.mkdtempSync(path.join(RUNNER_TEMP, `xapk_${APP_ID}_`));
+    // APKEditor merge failed. The previous fallback path here would
+    // `unzip *.apk` out of the BUNDLE and copy the highest-scored
+    // dex-bearing APK, which is always base.apk — and base.apk ships
+    // only armeabi-v7a libs in most universal bundles (Reddit, YouTube,
+    // etc.). The arm64-v8a / x86_64 native libs live in separate
+    // split_config.*.apk files that get silently discarded, producing
+    // an APK that installs nowhere on 64-bit-only devices. Refuse to
+    // ship that. The maintainer needs to fix the merge step (install
+    // APKEditor, update its jar, or hand a non-BUNDLE source).
+    let archiveContents = '';
     try {
-      const r = spawnSync('unzip', ['-o', '-q', apkCandidate, '*.apk', '-d', xapkTmp], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-      if (r.status !== 0) console.error('unzip on split package failed (continuing)');
-
-      let extracted = null;
-      const ranked = bestRankedApkInDir(xapkTmp);
-      for (const c of ranked) {
-        if (apkHasDex(c)) { extracted = c; break; }
-      }
-      if (!extracted) {
-        // Last fallback: largest dex-bearing APK.
-        try {
-          const files = fs.readdirSync(xapkTmp).map(f => {
-            const full = path.join(xapkTmp, f);
-            return { full, size: fs.statSync(full).size };
-          }).sort((a, b) => b.size - a.size);
-          for (const f of files) {
-            if (apkHasDex(f.full)) { extracted = f.full; break; }
-          }
-        } catch { /* ignore */ }
-      }
-      if (!extracted || !fs.existsSync(extracted)) {
-        console.error(`::error::Could not extract APK from split package: ${apkCandidate}`);
-        try {
-          const files = fs.readdirSync(xapkTmp).filter(f => f.endsWith('.apk'));
-          console.error('Archive APK contents:', files.join(' '));
-        } catch { /* ignore */ }
-        process.exit(1);
-      }
-      fs.copyFileSync(extracted, outApk);
-      console.log(`Extracted APK: ${outApk} (from ${path.basename(extracted)})`);
-      finalApk = outApk;
-    } finally {
-      try { fs.rmSync(xapkTmp, { recursive: true, force: true }); } catch { /* ignore */ }
-    }
+      const probe = spawnSync('unzip', ['-Z1', apkCandidate], {
+        encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      if (probe.status === 0) archiveContents = probe.stdout.split('\n').filter(Boolean).join(' ');
+    } catch { /* ignore */ }
+    console.error(`::error::APKEditor merge failed for ${APP_ID} ${effectiveTargetVersion}: ${apkCandidate}`);
+    console.error('BUNDLE/APK set requires merging base.apk + split_config.*.apk before patching.');
+    console.error('Falling back to base.apk-only would drop arm64-v8a / x86_64 native libs,');
+    console.error('producing an APK that silently fails to install on 64-bit-only devices.');
+    if (archiveContents) console.error(`Archive contents: ${archiveContents}`);
+    process.exit(1);
   }
 }
 
@@ -496,6 +576,29 @@ if (!apkHasDex(finalApk)) {
     console.error(`Files in ${APKS_DIR}:`, files.join(' '));
   } catch { /* ignore */ }
   process.exit(1);
+}
+
+// 8b. ABI guardrail. If the operator pinned a preferred_arch (typically
+//     "arm64-v8a"), the final APK must actually ship lib/<arch>/*.so.
+//     Without this check, the BUNDLE fallback path above used to happily
+//     emit a base.apk-only APK declaring only armeabi-v7a, which then
+//     silently fails to install on arm64-v8a-only devices (Pixel +
+//     GrapheneOS, etc.). The check is opt-in: no preferred_arch means
+//     no filter.
+const preferredArch = loadPreferredArch();
+if (preferredArch) {
+  const hasLibs = apkHasNativeLibsForArch(finalApk, preferredArch);
+  const nativeCodeLine = readApkNativeCode(finalApk);
+  console.log(`::debug::ABI check: preferred=${preferredArch}, hasLib/${preferredArch}/*.so=${hasLibs}, manifest=${nativeCodeLine || '(no native-code line)'}`);
+  if (!hasLibs) {
+    console.error(`::error::APK ${finalApk} is missing native libraries for preferred architecture '${preferredArch}'.`);
+    if (nativeCodeLine) console.error(`Manifest declares: ${nativeCodeLine}`);
+    console.error('This usually means a BUNDLE/APK set was not properly merged and only base.apk was kept,');
+    console.error('which ships armeabi-v7a libs while arm64-v8a / x86_64 libs sit in separate split APKs.');
+    console.error('Fix the merge step (APKEditor), or pin a non-BUNDLE source. Failing the build is');
+    console.error('intentional — shipping an un-installable APK is worse than no release.');
+    process.exit(1);
+  }
 }
 
 console.log(`Downloaded ${APP_ID} → ${finalApk}`);
