@@ -18,6 +18,7 @@ const { execFile, spawn } = require("child_process");
 const { chromium } = require("playwright");
 const os = require("node:os");
 const cheerio = require('cheerio');
+const { validateDownloadedApkAbi } = require('./apk-abi-validator');
 
 // APKMirror API credentials (from environment; no defaults — see apkMirrorAuthHeader).
 const APK_MIRROR_API_USER = process.env.APKMIRROR_API_USER;
@@ -447,6 +448,16 @@ async function resolveApkmirror(packageId, version) {
  * @returns {Promise<object>} Download result
  */
 async function downloadWithUrl(url, outputDir, packageId, version) {
+  // Read preferred_arch so we can validate the downloaded file's ABI
+  // composition. A 32-bit-only APK from upstream (e.g. APKMirror's
+  // "universal" row that's actually armeabi-v7a-only, or APKPure's
+  // single-arm fallback) must NOT be cached or handed back to the
+  // caller — the caller's fallback chain then picks the next source.
+  let preferredArchForUrl = '';
+  try {
+    preferredArchForUrl = loadConfig().preferred_arch || '';
+  } catch { /* missing/invalid config — fall through, no validation */ }
+
   console.error(`[download-url] Downloading from: ${url}`);
 
   // Use curl for direct downloads
@@ -495,6 +506,20 @@ async function downloadWithUrl(url, outputDir, packageId, version) {
           const validation = validateApkVersion(outputPath, version);
           if (!validation.valid) {
             reject(new Error(`VERSION MISMATCH: expected ${version}, got ${validation.version}`));
+            return;
+          }
+
+          // Validate ABI composition. If the upstream returned a file
+          // that doesn't actually ship the preferred architecture's .so
+          // libs, reject the download — the caller's fallback chain
+          // (apkmirror-api → apkeep → apkmirror-pw) will try the next
+          // source. Without this, a 32-bit-only "universal" APK would
+          // get cached and only fail much later inside
+          // download-supported-apk.js's ABI guardrail.
+          try {
+            validateDownloadedApkAbi(outputPath, preferredArchForUrl);
+          } catch (e) {
+            reject(e);
             return;
           }
 
@@ -811,6 +836,17 @@ async function downloadWithApkeep(packageId, version, outputDir) {
           throw new Error(`VERSION MISMATCH: Downloaded APK v${validation.actualVersion} but wanted v${version}. ${validation.error || "The requested version is not available from APKPure."}`);
         }
 
+        // Validate ABI composition. APKPure commonly serves a single-
+        // architecture APK per download (often armeabi-v7a-only). If
+        // that doesn't match the operator's preferred_arch, reject the
+        // download so the fallback chain (apkmirror-api → apkmirror-pw)
+        // can try a source that ships the right ABI.
+        let preferredArchForApkeep = '';
+        try {
+          preferredArchForApkeep = loadConfig().preferred_arch || '';
+        } catch { /* missing/invalid config — skip validation */ }
+        validateDownloadedApkAbi(apkPath, preferredArchForApkeep);
+
         downloadedVersion = version;
         console.error(`[apkeep] Version validated: ${downloadedVersion}`);
         apkeepSucceeded = true;
@@ -974,6 +1010,13 @@ async function downloadViaPlaywright(apkmirrorPath, version, outputDir) {
     if (stats.size < 10000) throw new Error(`Downloaded file too small: ${stats.size} bytes`);
 
     console.error(`[apkmirror-pw] Download complete: ${destPath} (${stats.size} bytes)`);
+    // Reject the download if the picked APKMirror variant doesn't
+    // actually ship the preferred arch's .so libs. APKMirror's row
+    // labels (arm64-v8a / universal / noarch) are occasionally
+    // mislabelled — a row can be marked "universal" but actually be a
+    // 32-bit-only upload. The DOM-driven selectVariant can't detect
+    // this; the post-download zip inspection can.
+    validateDownloadedApkAbi(destPath, preferredArch);
     return { success: true, path: destPath, filename: suggestedFilename, url: finalUrl };
   } finally {
     await browser.close();
