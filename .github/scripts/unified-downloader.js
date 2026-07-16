@@ -505,6 +505,13 @@ async function downloadWithUrl(url, outputDir, packageId, version) {
           // Validate APK version
           const validation = validateApkVersion(outputPath, version);
           if (!validation.valid) {
+            // Cleanup-on-failure: delete the partial file so a later
+            // fallback source's output isn't pre-empted by this stale
+            // file in findPackageCandidate's first-encountered tiebreak
+            // (filesystem-dependent readdir order; not guaranteed
+            // alphabetical on ext4). Best-effort; never mask the
+            // original error.
+            try { fs.unlinkSync(outputPath); } catch { /* best-effort */ }
             reject(new Error(`VERSION MISMATCH: expected ${version}, got ${validation.version}`));
             return;
           }
@@ -519,6 +526,11 @@ async function downloadWithUrl(url, outputDir, packageId, version) {
           try {
             validateDownloadedApkAbi(outputPath, preferredArchForUrl);
           } catch (e) {
+            // Cleanup-on-failure: same rationale as VERSION MISMATCH
+            // above. The throw from validateDownloadedApkAbi tells us
+            // upstream mislabelled the file; we must not let the
+            // partial APK survive to contaminate the next source.
+            try { fs.unlinkSync(outputPath); } catch { /* best-effort */ }
             reject(e);
             return;
           }
@@ -833,6 +845,13 @@ async function downloadWithApkeep(packageId, version, outputDir) {
         // ALWAYS validate the downloaded APK matches requested version
         const validation = validateApkVersion(apkPath, version);
         if (!validation.valid) {
+          // Cleanup-on-failure: APKPure just served a partial / wrong-
+          // version download. Delete it so the next source
+          // (apkmirror-api → apkmirror-pw) isn't contaminated by a
+          // stale .xapk/.apkm that findPackageCandidate's
+          // first-encountered tiebreak would pick over the working
+          // bundle. Best-effort.
+          try { fs.unlinkSync(apkPath); } catch { /* best-effort */ }
           throw new Error(`VERSION MISMATCH: Downloaded APK v${validation.actualVersion} but wanted v${version}. ${validation.error || "The requested version is not available from APKPure."}`);
         }
 
@@ -845,7 +864,17 @@ async function downloadWithApkeep(packageId, version, outputDir) {
         try {
           preferredArchForApkeep = loadConfig().preferred_arch || '';
         } catch { /* missing/invalid config — skip validation */ }
-        validateDownloadedApkAbi(apkPath, preferredArchForApkeep);
+        try {
+          validateDownloadedApkAbi(apkPath, preferredArchForApkeep);
+        } catch (abiErr) {
+          // Cleanup-on-failure: same rationale as VERSION MISMATCH
+          // above. APKPure served a single-arch APK that doesn't match
+          // preferred_arch — let the next source try. Delete before
+          // re-throwing so a stale partial file can't pre-empt the
+          // good download later in the chain.
+          try { fs.unlinkSync(apkPath); } catch { /* best-effort */ }
+          throw abiErr;
+        }
 
         downloadedVersion = version;
         console.error(`[apkeep] Version validated: ${downloadedVersion}`);
@@ -1016,7 +1045,24 @@ async function downloadViaPlaywright(apkmirrorPath, version, outputDir) {
     // mislabelled — a row can be marked "universal" but actually be a
     // 32-bit-only upload. The DOM-driven selectVariant can't detect
     // this; the post-download zip inspection can.
-    validateDownloadedApkAbi(destPath, preferredArch);
+    try {
+      validateDownloadedApkAbi(destPath, preferredArch);
+    } catch (abiErr) {
+      // Cleanup-on-failure: the Playwright path is the LAST fallback
+      // in the chain — but the contract is still that any validation
+      // throw leaves no stale file behind. If a future caller wires
+      // a retry around downloadViaPlaywright, a leftover .apkm here
+      // would be picked over the next attempt's result.
+      //
+      // No direct unit coverage (downloadViaPlaywright is not
+      // exported). The Playwright chain is the LAST fallback in the
+      // caller's sequential fallback, so the preemption scenario this
+      // fixes is hypothetical — the only realistic reason to get here
+      // is upstream serving a mislabelled-ABI bundle. Mirror the same
+      // shape as downloadWithUrl/downloadWithApkeep for consistency.
+      try { fs.unlinkSync(destPath); } catch { /* best-effort */ }
+      throw abiErr;
+    }
     return { success: true, path: destPath, filename: suggestedFilename, url: finalUrl };
   } finally {
     await browser.close();
@@ -1342,4 +1388,10 @@ module.exports = {
   cleanupOldUrls,
   parallelResolveSources,
   download,
+  // Exported for the cleanup-on-failure unit tests
+  // (__tests__/unified-downloader-cleanup.test.js). They exercise the
+  // post-download validation paths in isolation rather than driving
+  // them through the full download() fallback chain.
+  downloadWithUrl,
+  downloadWithApkeep,
 };
