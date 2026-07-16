@@ -246,6 +246,18 @@ Full setup instructions: [→ SETUP.md](SETUP.md)
 
 ---
 
+## Star History
+
+<a href="https://www.star-history.com/?repos=nxn94%2FAutoMorpheBuilder&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=nxn94/AutoMorpheBuilder&type=date&theme=dark&legend=top-left&sealed_token=Gp78mKVdDq4N7f0AphpB_KMK4gmKFDIKQ8jX9xMDpnqEo_YNMkRq2xQGSget7xg480u4h083hSEGkGBSeFLF1sSrtsM51QRaMiDjnXhFvhTygKHPXoKubMNugI8sp-bETnQRChiZA66pYOpeuKQgvGqLGCBxgLdQEULCEKLtV22hwPvVcsDm" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=nxn94/AutoMorpheBuilder&type=date&legend=top-left&sealed_token=Gp78mKVdDq4N7f0AphpB_KMK4gmKFDIKQ8jX9xMDpnqEo_YNMkRq2xQGSget7xg480u4h083hSEGkGBSeFLF1sSrtsM51QRaMiDjnXhFvhTygKHPXoKubMNugI8sp-bETnQRChiZA66pYOpeuKQgvGqLGCBxgLdQEULCEKLtV22hwPvVcsDm" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=nxn94/AutoMorpheBuilder&type=date&legend=top-left&sealed_token=Gp78mKVdDq4N7f0AphpB_KMK4gmKFDIKQ8jX9xMDpnqEo_YNMkRq2xQGSget7xg480u4h083hSEGkGBSeFLF1sSrtsM51QRaMiDjnXhFvhTygKHPXoKubMNugI8sp-bETnQRChiZA66pYOpeuKQgvGqLGCBxgLdQEULCEKLtV22hwPvVcsDm" />
+ </picture>
+</a>
+
+---
+
 ## 📜 License
 
 Apache License 2.0 - See [LICENSE](LICENSE)
