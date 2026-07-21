@@ -1,4 +1,4 @@
-name: Build Morphe-patched apps
+Name: Build Morphe-patched apps
 
 on:
   workflow_dispatch:
@@ -180,7 +180,7 @@ jobs:
         uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: "21"
 
       - name: Verify dependencies
         id: deps
