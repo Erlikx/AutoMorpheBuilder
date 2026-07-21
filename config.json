@@ -19,6 +19,12 @@
       "repo": "MorpheApp/morphe-patches",
       "branch": "dev",
       "apkmirror_path": "redditinc/reddit"
+    },
+    "com.twitter.android": {
+      "name": "twitter",
+      "repo": "crimera/piko",
+      "branch": "dev",
+      "apkmirror_path": "twitter-inc/twitter"
     }
   },
   "cli": {
