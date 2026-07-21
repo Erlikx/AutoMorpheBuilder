@@ -28,7 +28,7 @@
     }
   },
   "cli": {
-    "repo": "MorpheApp/morphe-cli",
+    "repo": "MorpheApp/morphe-desktop",
     "branch": "dev"
   },
   "download_urls": {
