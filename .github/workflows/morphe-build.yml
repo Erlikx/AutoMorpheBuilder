@@ -104,7 +104,7 @@ jobs:
         id: tools
         if: steps.check.outputs.should-build == 'true'
         env:
-          CLI_REPO: MorpheApp/morphe-cli
+          CLI_REPO: MorpheApp/morphe-desktop
           CLI_TAG: ${{ steps.check.outputs.cli-version }}
           REPO_VERSIONS: ${{ steps.check.outputs.repo-versions }}
         run: bash scripts/download_morphe_tools.sh
