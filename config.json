@@ -35,6 +35,10 @@
     "com.google.android.apps.youtube.music": {
       "8.44.54": "https://www.apkmirror.com/apk/google-inc/youtube-music/youtube-music-8-44-54-release/youtube-music-8-44-54-android-apk-download/",
       "latest_supported": "https://www.apkmirror.com/apk/google-inc/youtube-music/youtube-music-8-44-54-release/youtube-music-8-44-54-android-apk-download/"
+    },
+    "com.reddit.frontpage": {
+      "2026.29.0": "https://www.apkmirror.com/apk/redditinc/reddit/reddit-2026-29-0-release/reddit-2026-29-0-android-apk-download/",
+      "latest_supported": "https://www.apkmirror.com/apk/redditinc/reddit/reddit-2026-29-0-release/reddit-2026-29-0-android-apk-download/"
     }
   }
 }
