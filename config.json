@@ -5,25 +5,25 @@
     "com.google.android.youtube": {
       "name": "youtube",
       "repo": "MorpheApp/morphe-patches",
-      "branch": "main",
+      "branch": "dev",
       "apkmirror_path": "google-inc/youtube"
     },
     "com.google.android.apps.youtube.music": {
       "name": "ytmusic",
       "repo": "MorpheApp/morphe-patches",
-      "branch": "main",
+      "branch": "dev",
       "apkmirror_path": "google-inc/youtube-music"
     },
     "com.reddit.frontpage": {
       "name": "reddit",
       "repo": "MorpheApp/morphe-patches",
-      "branch": "main",
+      "branch": "dev",
       "apkmirror_path": "redditinc/reddit"
     }
   },
   "cli": {
     "repo": "MorpheApp/morphe-cli",
-    "branch": "main"
+    "branch": "dev"
   },
   "download_urls": {
     "com.google.android.apps.youtube.music": {
